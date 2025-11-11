@@ -1,0 +1,71 @@
+{{define "challenges.html"}}
+{{template "layout" .}}
+{{end}}
+
+{{define "content"}}
+<article class="panel challenges-panel">
+    <h1>Initiation Challenges</h1>
+    <p>The collective rotates three initiation puzzles every UTC cycle. Unlock any flag to trade for an invite JWT encoded with new member metadata.</p>
+    <p class="hint">Current cycle: <strong>{{.CycleDescriptor}}</strong> · Next refresh: <time datetime="{{.RefreshISO}}">{{.RefreshHuman}}</time> UTC.</p>
+    <section class="challenge-grid">
+        {{range .Challenges}}
+        <section class="challenge-card">
+            <header class="challenge-header">
+                <div class="challenge-tags">
+                    <span class="tag">{{.Audience}}</span>
+                    <span class="tag subtle">{{.Category}}</span>
+                </div>
+                <h2>{{.Title}}</h2>
+                <p>{{.Summary}}</p>
+            </header>
+            <div class="challenge-body">
+                <div class="challenge-columns">
+                    <div>
+                        <h3>Objectives</h3>
+                        <ul>
+                            {{range .Objectives}}<li>{{.}}</li>{{end}}
+                        </ul>
+                    </div>
+                    <div>
+                        <h3>Execution</h3>
+                        <ol>
+                            {{range .Steps}}<li>{{.}}</li>{{end}}
+                        </ol>
+                    </div>
+                </div>
+                {{if .Artifacts}}
+                <div class="artifact-grid">
+                    {{range .Artifacts}}
+                    <div class="artifact">
+                        <h4>{{.Label}}</h4>
+                        {{if .Code}}
+                        <pre><code>{{.Value}}</code></pre>
+                        {{else}}
+                        <p>{{.Value}}</p>
+                        {{end}}
+                        {{if .Hint}}<p class="hint">{{.Hint}}</p>{{end}}
+                    </div>
+                    {{end}}
+                </div>
+                {{end}}
+                {{if .Palette}}
+                <div class="palette">
+                    {{range .Palette}}
+                    <div class="swatch" style="--swatch-color: {{.Hex}};">
+                        <span>{{.Hex}}</span>
+                    </div>
+                    {{end}}
+                </div>
+                <p class="hint">Translate each swatch's RGB channels to ASCII (hexadecimal) to reveal the glyph.</p>
+                {{end}}
+            </div>
+            <footer class="challenge-footer">
+                <p><strong>Flag Format:</strong> {{.FlagFormat}}</p>
+                <p class="hint">{{.RefreshNote}}</p>
+                {{range .Lore}}<p class="lore">{{.}}</p>{{end}}
+            </footer>
+        </section>
+        {{end}}
+    </section>
+</article>
+{{end}}
