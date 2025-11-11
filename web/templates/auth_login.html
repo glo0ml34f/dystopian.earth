@@ -1,0 +1,20 @@
+{{define "auth_login.html"}}
+{{template "layout" .}}
+{{end}}
+
+{{define "content"}}
+<section class="panel form-panel">
+    <h1>Member Login</h1>
+    {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+    <form method="post" action="/login">
+        <label>Email
+            <input type="email" name="email" required autofocus>
+        </label>
+        <label>Password
+            <input type="password" name="password" required>
+        </label>
+        <button type="submit">Sign In</button>
+    </form>
+    <p class="hint">Need access? <a href="/register">Request an invite</a>.</p>
+</section>
+{{end}}

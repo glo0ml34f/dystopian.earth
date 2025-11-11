@@ -1,0 +1,26 @@
+{{define "auth_register.html"}}
+{{template "layout" .}}
+{{end}}
+
+{{define "content"}}
+<section class="panel form-panel">
+    <h1>Request Access</h1>
+    {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+    <form method="post" action="/register">
+        <label>Handle / Call Sign
+            <input type="text" name="display_name" required>
+        </label>
+        <label>Email
+            <input type="email" name="email" required>
+        </label>
+        <label>Invite Code
+            <input type="text" name="invite_code" required>
+        </label>
+        <label>Challenge Solution
+            <textarea name="challenge_answer" rows="3" placeholder="Describe how you solved the invite puzzle" required></textarea>
+        </label>
+        <button type="submit">Submit Request</button>
+    </form>
+    <p class="hint">Registrations require admin approval. We will reach out once verified.</p>
+</section>
+{{end}}

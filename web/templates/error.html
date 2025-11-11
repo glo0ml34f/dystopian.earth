@@ -1,0 +1,11 @@
+{{define "error.html"}}
+{{template "layout" .}}
+{{end}}
+
+{{define "content"}}
+<section class="panel">
+    <h1>Error {{.Status}}</h1>
+    <p>{{.Message}}</p>
+    <p><a href="/">Return home</a></p>
+</section>
+{{end}}

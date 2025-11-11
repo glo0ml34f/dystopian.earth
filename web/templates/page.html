@@ -1,0 +1,10 @@
+{{define "page.html"}}
+{{template "layout" .}}
+{{end}}
+
+{{define "content"}}
+<article class="panel">
+    <h1>{{.Title}}</h1>
+    <div class="markdown">{{.Content}}</div>
+</article>
+{{end}}

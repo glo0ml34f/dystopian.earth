@@ -1,0 +1,41 @@
+{{define "dashboard.html"}}
+{{template "layout" .}}
+{{end}}
+
+{{define "content"}}
+<section class="panel">
+    <h1>Member Dashboard</h1>
+    {{if .Message}}<p class="info">{{.Message}}</p>{{end}}
+    {{if .User}}
+    <div class="grid">
+        <div>
+            <h2>Profile</h2>
+            <form method="post" action="/profile">
+                <label>Display Name
+                    <input type="text" name="display_name" value="{{.User.Name}}" required>
+                </label>
+                <label>Bio
+                    <textarea name="bio" rows="3" placeholder="Share a short bio"></textarea>
+                </label>
+                <button type="submit">Update Profile</button>
+            </form>
+        </div>
+        <div>
+            <h2>Payment</h2>
+            <p>Manage your membership support via your chosen payment provider.</p>
+            <form method="post" action="/payment">
+                <label>Provider
+                    <input type="text" name="payment_provider" placeholder="Stripe, Patreon, etc.">
+                </label>
+                <label>Reference
+                    <input type="text" name="payment_ref" placeholder="Customer ID or subscription link">
+                </label>
+                <button type="submit">Save Payment Info</button>
+            </form>
+        </div>
+    </div>
+    {{else}}
+    <p>You are not logged in.</p>
+    {{end}}
+</section>
+{{end}}
