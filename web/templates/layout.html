@@ -1,0 +1,35 @@
+{{define "layout"}}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{if .Title}}{{.Title}} · {{end}}dystopian.earth</title>
+    <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body class="bg-dark text-light">
+    <header class="container">
+        <div class="brand">
+            <a href="/">dystopian.<span>earth</span></a>
+        </div>
+        <nav>
+            <a href="/pages/about">About</a>
+            <a href="/pages/mission">Mission</a>
+            <a href="/pages/join">Join</a>
+            {{if .User}}
+            <a href="/dashboard">Dashboard</a>
+            <a href="/logout">Logout</a>
+            {{else}}
+            <a href="/login">Login</a>
+            {{end}}
+        </nav>
+    </header>
+    <main class="container">
+        {{block "content" .}}{{end}}
+    </main>
+    <footer class="container footer">
+        <p>© {{.Year}} dystopian.earth · made by the collective</p>
+    </footer>
+</body>
+</html>
+{{end}}

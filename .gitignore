@@ -1,0 +1,16 @@
+# Binaries
+portal
+*.exe
+*.out
+
+# Databases
+*.db
+*.sqlite
+
+# Runtime artifacts
+*.log
+/tmp/
+.DS_Store
+
+# Go build cache
+bin/
