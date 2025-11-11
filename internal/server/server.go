@@ -197,14 +197,35 @@ func (s *Server) renderError(w http.ResponseWriter, _ *http.Request, status int,
 }
 
 func (s *Server) getLogin(w http.ResponseWriter, r *http.Request) {
-	s.renderTemplate(w, r, "auth_login.html", map[string]any{})
+	token := strings.TrimSpace(r.URL.Query().Get("token"))
+	if token != "" {
+		s.completeTokenLogin(w, r, token)
+		return
+	}
+	s.clearPendingLogin(r.Context())
+	s.renderLogin(w, r, map[string]any{})
 }
 
 func (s *Server) postLogin(w http.ResponseWriter, r *http.Request) {
-	// TODO: implement authentication with password verification
-	s.renderTemplate(w, r, "auth_login.html", map[string]any{
-		"Error": "authentication not yet implemented",
-	})
+	if err := r.ParseForm(); err != nil {
+		s.renderLogin(w, r, map[string]any{
+			"Error": "We could not understand that request. Please try again.",
+		})
+		return
+	}
+
+	switch r.PostFormValue("mode") {
+	case "admin":
+		s.handleAdminLogin(w, r)
+	case "link":
+		s.handleLoginLinkRequest(w, r)
+	case "otp":
+		s.handleOTPVerification(w, r)
+	default:
+		s.renderLogin(w, r, map[string]any{
+			"Error": "Unsupported login request.",
+		})
+	}
 }
 
 func (s *Server) getLogout(w http.ResponseWriter, r *http.Request) {
