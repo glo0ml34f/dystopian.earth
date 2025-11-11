@@ -89,6 +89,7 @@ func (s *Server) Routes() http.Handler {
 
 	r.Get("/", s.handlePage("index"))
 	r.Get("/pages/{slug}", s.pageHandler)
+	r.Get("/challenges", s.challenges)
 
 	r.Get("/login", s.getLogin)
 	r.Post("/login", s.postLogin)

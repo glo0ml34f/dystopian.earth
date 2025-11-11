@@ -15,6 +15,7 @@ type Config struct {
 	RedisPassword string
 	SessionTTL    time.Duration
 	InviteSecret  string
+	FlagSecret    string
 	ContentDir    string
 	TemplatesDir  string
 	StaticDir     string
@@ -28,6 +29,7 @@ func FromEnv() Config {
 		RedisAddr:     getEnv("PORTAL_REDIS_ADDR", "127.0.0.1:6379"),
 		RedisPassword: getEnv("PORTAL_REDIS_PASSWORD", ""),
 		InviteSecret:  getEnv("PORTAL_INVITE_SECRET", "change-me"),
+		FlagSecret:    getEnv("PORTAL_FLAG_SECRET", "rotate-me"),
 		ContentDir:    getEnv("PORTAL_CONTENT_DIR", "content"),
 		TemplatesDir:  getEnv("PORTAL_TEMPLATES_DIR", "web/templates"),
 		StaticDir:     getEnv("PORTAL_STATIC_DIR", "web/static"),
