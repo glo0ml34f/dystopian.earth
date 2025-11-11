@@ -29,6 +29,8 @@ type Server struct {
 	templates Templates
 	renderer  markdown.Renderer
 	contentFS fs.FS
+	redisPool *redis.Pool
+	inviteJWT *inviteTokenManager
 }
 
 // New creates a new server instance.
@@ -64,6 +66,11 @@ func New(cfg config.Config, db *sql.DB, templates Templates) (*Server, error) {
 	renderer := markdown.New()
 	content := os.DirFS(cfg.ContentDir)
 
+	tokens, err := newInviteTokenManager(5 * time.Minute)
+	if err != nil {
+		return nil, fmt.Errorf("init invite tokens: %w", err)
+	}
+
 	return &Server{
 		cfg:       cfg,
 		db:        db,
@@ -71,6 +78,8 @@ func New(cfg config.Config, db *sql.DB, templates Templates) (*Server, error) {
 		templates: templates,
 		renderer:  renderer,
 		contentFS: content,
+		redisPool: pool,
+		inviteJWT: tokens,
 	}, nil
 }
 
@@ -83,6 +92,7 @@ func (s *Server) Routes() http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
 	r.Use(s.sessions.LoadAndSave)
+	r.Use(s.postShield)
 
 	fileServer := http.FileServer(http.Dir(s.cfg.StaticDir))
 	r.Handle("/static/*", http.StripPrefix("/static/", fileServer))
@@ -95,8 +105,12 @@ func (s *Server) Routes() http.Handler {
 	r.Post("/login", s.postLogin)
 	r.Get("/logout", s.requireAuth(s.getLogout))
 
-	r.Get("/register", s.getRegister)
-	r.Post("/register", s.postRegister)
+	r.Get("/join", s.getJoin)
+	r.Post("/join", s.postJoin)
+	r.Post("/join/flag", s.postJoinFlag)
+
+	r.Get("/register", s.getJoin)
+	r.Post("/register", s.postJoin)
 
 	r.Group(func(protected chi.Router) {
 		protected.Use(s.authMiddleware)
@@ -196,17 +210,6 @@ func (s *Server) postLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getLogout(w http.ResponseWriter, r *http.Request) {
 	s.sessions.Destroy(r.Context())
 	http.Redirect(w, r, "/", http.StatusFound)
-}
-
-func (s *Server) getRegister(w http.ResponseWriter, r *http.Request) {
-	s.renderTemplate(w, r, "auth_register.html", nil)
-}
-
-func (s *Server) postRegister(w http.ResponseWriter, r *http.Request) {
-	// TODO: registration handling with invite validation and challenge checks
-	s.renderTemplate(w, r, "auth_register.html", map[string]any{
-		"Error": "registration flow not yet implemented",
-	})
 }
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {

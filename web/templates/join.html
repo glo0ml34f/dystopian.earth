@@ -1,0 +1,43 @@
+{{define "join.html"}}
+{{template "layout" .}}
+{{end}}
+
+{{define "content"}}
+<section class="panel form-panel" data-token-ttl="{{.InviteTTLSeconds}}">
+    <h1>Join the Collective</h1>
+    <p class="hint">Provide your contact details and a short introduction. If you solved a daily challenge, mint your own invite token below.</p>
+    {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+    {{if .Success}}<p class="info" role="status">{{.Success}}</p>{{end}}
+    <form id="join-form" method="post" action="/join">
+        <label>Desired Handle
+            <input type="text" name="display_name" id="handle" value="{{.Form.Handle}}" minlength="2" maxlength="32" required autocomplete="nickname">
+        </label>
+        <label>Email Address
+            <input type="email" name="email" id="email" value="{{.Form.Email}}" required autocomplete="email">
+        </label>
+        <label>Invite Code
+            <input type="text" name="invite_code" id="invite-code" value="{{.Form.InviteCode}}" required placeholder="Paste an invite JWT or code">
+            <span class="hint">Invites minted from flags expire quickly—submit the form promptly.</span>
+        </label>
+        <div class="flag-mint">
+            <div class="flag-fields">
+                <label>Flag Submission (optional)
+                    <input type="text" id="flag-input" placeholder="dystopia{...}">
+                </label>
+                <button type="button" id="flag-submit">Verify Flag</button>
+            </div>
+            <p class="hint" id="flag-hint">Fill in your handle and email first. Verified flags mint an invite token valid for {{.InviteTTLMinutes}} minutes.</p>
+            <p class="error" id="flag-error" role="alert" hidden></p>
+            <p class="info" id="flag-success" role="status" hidden></p>
+        </div>
+        <label>SSH Public Key (optional)
+            <textarea name="ssh_pubkey" id="ssh-pubkey" rows="3" placeholder="ssh-ed25519 AAAAC3...">{{- .Form.SSHPubKey -}}</textarea>
+        </label>
+        <label>Introduction
+            <textarea name="introduction" id="introduction" rows="4" maxlength="1200" placeholder="Share your interests, goals, and the skills you want to bring to the collective." required>{{- .Form.Introduction -}}</textarea>
+        </label>
+        <button type="submit">Submit Request</button>
+    </form>
+</section>
+<script src="/static/js/join.js" defer></script>
+{{end}}

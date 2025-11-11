@@ -130,6 +130,34 @@ button:hover {
     margin: 0 auto;
 }
 
+.flag-mint {
+    border: 1px solid rgba(102, 0, 241, 0.3);
+    border-radius: 12px;
+    padding: 1rem;
+    background: rgba(102, 0, 241, 0.08);
+    display: grid;
+    gap: 0.75rem;
+}
+
+.flag-fields {
+    display: grid;
+    gap: 0.75rem;
+}
+
+.flag-fields button {
+    justify-self: start;
+}
+
+@media (min-width: 600px) {
+    .flag-fields {
+        grid-template-columns: 1fr auto;
+        align-items: end;
+    }
+    .flag-fields button {
+        justify-self: end;
+    }
+}
+
 .grid {
     display: grid;
     gap: 2rem;
