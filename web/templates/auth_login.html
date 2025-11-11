@@ -4,17 +4,50 @@
 
 {{define "content"}}
 <section class="panel form-panel">
-    <h1>Member Login</h1>
+    <h1>Access the Collective</h1>
     {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+    {{if .Success}}<p class="success">{{.Success}}</p>{{end}}
+
+    {{if .OTPRequired}}
+    <p class="hint">Enter the 6-digit code from your authenticator app to finish signing in as {{.Email}}.</p>
     <form method="post" action="/login">
-        <label>Email
-            <input type="email" name="email" required autofocus>
+        <input type="hidden" name="mode" value="otp">
+        {{if .Next}}<input type="hidden" name="next" value="{{.Next}}">{{end}}
+        <label>Authentication Code
+            <input type="text" name="otp_code" inputmode="numeric" pattern="[0-9]*" minlength="6" maxlength="6" required autofocus>
         </label>
-        <label>Password
-            <input type="password" name="password" required>
-        </label>
-        <button type="submit">Sign In</button>
+        <button type="submit">Verify &amp; Continue</button>
     </form>
+    {{else}}
+    <section class="form-subpanel">
+        <h2>Administrator access</h2>
+        <form method="post" action="/login">
+            <input type="hidden" name="mode" value="admin">
+            {{if .Next}}<input type="hidden" name="next" value="{{.Next}}">{{end}}
+            <label>Email or handle
+                <input type="text" name="email" autocomplete="username" required autofocus>
+            </label>
+            <label>Password
+                <input type="password" name="password" autocomplete="current-password" required>
+            </label>
+            <button type="submit">Sign In</button>
+        </form>
+    </section>
+
+    <section class="form-subpanel">
+        <h2>Member magic link</h2>
+        <form method="post" action="/login">
+            <input type="hidden" name="mode" value="link">
+            {{if .Next}}<input type="hidden" name="next" value="{{.Next}}">{{end}}
+            <label>Email address
+                <input type="email" name="email" autocomplete="email" value="{{with .MemberForm}}{{index . "Email"}}{{end}}" required>
+            </label>
+            <button type="submit">Send login link</button>
+        </form>
+        <p class="hint">We'll send you a secure sign-in link that expires in one hour.</p>
+    </section>
+    {{end}}
+
     <p class="hint">Need access? <a href="/register">Request an invite</a>.</p>
 </section>
 {{end}}
