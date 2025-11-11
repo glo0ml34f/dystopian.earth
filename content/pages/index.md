@@ -1,4 +1,4 @@
-# Welcome to dystopian.earth
+# don't suffer this dystopian earth alone
 
 We are a loose collective of builders, breakers, and dreamers. Our portal gives members a secure place to share research, collaborate on operations, and support one another.
 
