@@ -25,10 +25,26 @@
                 <td>#{{.ID}}</td>
                 <td>{{.DisplayName}}</td>
                 <td>{{.Email}}</td>
-                <td><code>{{.InviteCode}}</code></td>
+                <td>
+                    {{if .InviteClaims}}
+                    <details>
+                        <summary>{{.InviteSummary}}</summary>
+                        <ul class="claim-list">
+                            {{range .InviteClaims}}
+                            <li><strong>{{.Key}}:</strong> {{.Value}}</li>
+                            {{end}}
+                        </ul>
+                    </details>
+                    {{else if .InviteFallback}}
+                    <code>{{.InviteFallback}}</code>
+                    {{else}}
+                    <span>—</span>
+                    {{end}}
+                </td>
                 <td>
                     <details>
                         <summary>Show details</summary>
+                        <p><strong>Requested:</strong> {{.CreatedAt.Format "2006-01-02 15:04"}}</p>
                         <p><strong>Challenge:</strong> {{.ChallengeAnswer}}</p>
                         {{if .SSHPubKey}}<p><strong>SSH:</strong> <code>{{.SSHPubKey}}</code></p>{{end}}
                         <p><strong>Introduction:</strong><br>{{.Introduction}}</p>

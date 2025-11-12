@@ -1,0 +1,81 @@
+{{define "admin_user.html"}}
+{{template "layout" .}}
+{{end}}
+
+{{define "content"}}
+<section class="panel">
+    <h1>Manage {{.Profile.DisplayName}}</h1>
+    <p><strong>Email:</strong> {{.Profile.Email}}</p>
+    {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+    {{if .Message}}<p class="info">{{.Message}}</p>{{end}}
+    <div class="grid two">
+        <div>
+            <h2>Status</h2>
+            <ul class="stats">
+                <li><strong>User ID:</strong> #{{.Profile.ID}}</li>
+                <li><strong>Created:</strong> {{.Profile.CreatedAt.Format "2006-01-02 15:04"}}</li>
+                <li><strong>Approved:</strong> {{if .Profile.ApprovedAt}}{{.Profile.ApprovedAt.Format "2006-01-02 15:04"}}{{else}}—{{end}}</li>
+                <li><strong>Roles:</strong> {{if .Profile.Admin}}Administrator{{else}}Member{{end}}</li>
+                <li><strong>Dues:</strong> {{if .Profile.DuesCurrent}}Current{{else}}Past Due{{end}}</li>
+                <li><strong>Account:</strong> {{if .Profile.Disabled}}Disabled{{else}}Active{{end}}</li>
+                <li><strong>OTP:</strong> {{if .Profile.OTPConfigured}}Configured{{else}}Not Configured{{end}}{{if .Profile.OTPEnabledAt}} (since {{.Profile.OTPEnabledAt.Format "2006-01-02"}}){{end}}</li>
+                <li><strong>LDAP Secret:</strong> {{if .Profile.LDAPConfigured}}Stored{{else}}Missing{{end}}</li>
+                <li><strong>WireGuard Config:</strong> {{if .Profile.WireguardConfigured}}Stored{{else}}Missing{{end}}</li>
+            </ul>
+        </div>
+        <div>
+            <h2>Edit Profile</h2>
+            <form method="post" action="/admin/users/{{.Profile.ID}}/update" class="stack">
+                <label>Display name
+                    <input type="text" name="display_name" value="{{.Profile.DisplayName}}" maxlength="64" required>
+                </label>
+                <label>Bio
+                    <textarea name="bio" rows="4" maxlength="1024">{{.Profile.Bio}}</textarea>
+                </label>
+                <div class="grid two">
+                    <label>Payment provider
+                        <input type="text" name="payment_provider" value="{{.Profile.PaymentProvider}}" maxlength="128">
+                    </label>
+                    <label>Payment reference
+                        <input type="text" name="payment_ref" value="{{.Profile.PaymentRef}}" maxlength="128">
+                    </label>
+                </div>
+                <label class="checkbox">
+                    <input type="checkbox" name="dues_current" {{if .Profile.DuesCurrent}}checked{{end}}> Member is current on dues
+                </label>
+                <label class="checkbox">
+                    <input type="checkbox" name="is_admin" {{if .Profile.Admin}}checked{{end}}> Grant administrator access
+                </label>
+                <div class="actions">
+                    <button type="submit">Save Changes</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</section>
+
+<section class="panel">
+    <h2>Additional Details</h2>
+    <div class="grid two">
+        <div>
+            <h3>Introduction</h3>
+            <pre>{{if .Profile.Introduction}}{{.Profile.Introduction}}{{else}}(none provided){{end}}</pre>
+        </div>
+        <div>
+            <h3>SSH Public Key</h3>
+            <pre>{{if .Profile.SSHPubKey}}{{.Profile.SSHPubKey}}{{else}}(none provided){{end}}</pre>
+        </div>
+    </div>
+    <div class="actions">
+        <form method="post" action="/admin/users/{{.Profile.ID}}/toggle-disable">
+            <button type="submit">{{if .Profile.Disabled}}Enable Account{{else}}Disable Account{{end}}</button>
+        </form>
+        <form method="post" action="/admin/users/{{.Profile.ID}}/promote">
+            <button type="submit" {{if .Profile.Admin}}disabled{{end}}>Promote to Admin</button>
+        </form>
+        <form method="post" action="/admin/users/{{.Profile.ID}}/delete" onsubmit="return confirm('Permanently delete {{.Profile.DisplayName}}?');">
+            <button type="submit" class="danger">Delete Account</button>
+        </form>
+    </div>
+</section>
+{{end}}

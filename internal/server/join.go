@@ -313,6 +313,31 @@ func (m *inviteTokenManager) Mint(handle, email string) (string, time.Time, erro
 	return signed, expiresAt, nil
 }
 
+func (m *inviteTokenManager) SignClaims(claims jwt.MapClaims) (string, error) {
+	now := time.Now().UTC()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if err := m.ensureFreshLocked(now); err != nil {
+		return "", err
+	}
+
+	copyClaims := jwt.MapClaims{}
+	for key, value := range claims {
+		copyClaims[key] = value
+	}
+
+	if _, ok := copyClaims["iat"]; !ok {
+		copyClaims["iat"] = jwt.NewNumericDate(now)
+	}
+	if _, ok := copyClaims["exp"]; !ok && m.ttl > 0 {
+		copyClaims["exp"] = jwt.NewNumericDate(now.Add(m.ttl))
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, copyClaims)
+	return token.SignedString(m.current)
+}
+
 func (m *inviteTokenManager) Validate(token string) (jwt.MapClaims, error) {
 	now := time.Now().UTC()
 	m.mu.Lock()

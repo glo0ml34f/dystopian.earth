@@ -40,6 +40,7 @@ type authUser struct {
 	Admin       bool
 	OTPSecret   string
 	DuesCurrent bool
+	Disabled    bool
 }
 
 type loginTicket struct {
@@ -105,6 +106,14 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
 		s.renderLogin(w, r, map[string]any{
 			"Error":     "Invalid credentials.",
+			"ActiveTab": "admin",
+		})
+		return
+	}
+
+	if user.Disabled {
+		s.renderLogin(w, r, map[string]any{
+			"Error":     "This administrator account is disabled.",
 			"ActiveTab": "admin",
 		})
 		return
@@ -276,6 +285,9 @@ func (s *Server) completeTokenLogin(w http.ResponseWriter, r *http.Request, toke
 }
 
 func (s *Server) establishSession(ctx context.Context, user authUser) {
+	if user.Admin {
+		user.DuesCurrent = true
+	}
 	s.sessions.Put(ctx, "user_id", user.ID)
 	s.sessions.Put(ctx, "email", user.Email)
 	s.sessions.Put(ctx, "display_name", user.DisplayName)
@@ -291,7 +303,7 @@ func (s *Server) clearPendingLogin(ctx context.Context) {
 }
 
 func (s *Server) lookupUserByEmail(ctx context.Context, email string) (authUser, string, error) {
-	const query = `SELECT id, email, display_name, is_admin, otp_secret, password_hash, dues_current FROM users WHERE email = ?`
+	const query = `SELECT id, email, display_name, is_admin, otp_secret, password_hash, dues_current, is_disabled FROM users WHERE email = ?`
 
 	var (
 		id          int
@@ -301,9 +313,10 @@ func (s *Server) lookupUserByEmail(ctx context.Context, email string) (authUser,
 		otpSecret   sql.NullString
 		password    sql.NullString
 		dues        int
+		disabled    int
 	)
 
-	err := s.db.QueryRowContext(ctx, query, email).Scan(&id, &dbEmail, &displayName, &isAdmin, &otpSecret, &password, &dues)
+	err := s.db.QueryRowContext(ctx, query, email).Scan(&id, &dbEmail, &displayName, &isAdmin, &otpSecret, &password, &dues, &disabled)
 	if err != nil {
 		return authUser{}, "", err
 	}
@@ -314,6 +327,7 @@ func (s *Server) lookupUserByEmail(ctx context.Context, email string) (authUser,
 		DisplayName: displayName,
 		Admin:       isAdmin == 1,
 		DuesCurrent: dues == 1,
+		Disabled:    disabled == 1,
 	}
 	if otpSecret.Valid {
 		user.OTPSecret = strings.TrimSpace(otpSecret.String)
@@ -352,7 +366,7 @@ func (s *Server) lookupLoginToken(ctx context.Context, token string) (*loginTick
 }
 
 func (s *Server) lookupLoginTokenByID(ctx context.Context, id int) (*loginTicket, error) {
-	const query = `SELECT lt.id, lt.token_hash, lt.expires_at, lt.consumed_at, u.id, u.email, u.display_name, u.is_admin, u.otp_secret, u.dues_current FROM login_tokens lt JOIN users u ON u.id = lt.user_id WHERE lt.id = ?`
+	const query = `SELECT lt.id, lt.token_hash, lt.expires_at, lt.consumed_at, u.id, u.email, u.display_name, u.is_admin, u.otp_secret, u.dues_current, u.is_disabled FROM login_tokens lt JOIN users u ON u.id = lt.user_id WHERE lt.id = ?`
 
 	var (
 		tokenID   int
@@ -365,9 +379,10 @@ func (s *Server) lookupLoginTokenByID(ctx context.Context, id int) (*loginTicket
 		admin     int
 		otpSecret sql.NullString
 		dues      int
+		disabled  int
 	)
 
-	err := s.db.QueryRowContext(ctx, query, id).Scan(&tokenID, &tokenHash, &expires, &consumed, &userID, &email, &name, &admin, &otpSecret, &dues)
+	err := s.db.QueryRowContext(ctx, query, id).Scan(&tokenID, &tokenHash, &expires, &consumed, &userID, &email, &name, &admin, &otpSecret, &dues, &disabled)
 	if err != nil {
 		return nil, err
 	}
@@ -383,16 +398,20 @@ func (s *Server) lookupLoginTokenByID(ctx context.Context, id int) (*loginTicket
 			DisplayName: name,
 			Admin:       admin == 1,
 			DuesCurrent: dues == 1,
+			Disabled:    disabled == 1,
 		},
 	}
 	if otpSecret.Valid {
 		ticket.User.OTPSecret = strings.TrimSpace(otpSecret.String)
 	}
+	if ticket.User.Disabled {
+		return nil, errInvalidToken
+	}
 	return ticket, nil
 }
 
 func (s *Server) lookupLoginTokenByHash(ctx context.Context, hash string) (*loginTicket, error) {
-	const query = `SELECT lt.id, lt.token_hash, lt.expires_at, lt.consumed_at, u.id, u.email, u.display_name, u.is_admin, u.otp_secret, u.dues_current FROM login_tokens lt JOIN users u ON u.id = lt.user_id WHERE lt.token_hash = ?`
+	const query = `SELECT lt.id, lt.token_hash, lt.expires_at, lt.consumed_at, u.id, u.email, u.display_name, u.is_admin, u.otp_secret, u.dues_current, u.is_disabled FROM login_tokens lt JOIN users u ON u.id = lt.user_id WHERE lt.token_hash = ?`
 
 	var (
 		tokenID   int
@@ -405,9 +424,10 @@ func (s *Server) lookupLoginTokenByHash(ctx context.Context, hash string) (*logi
 		admin     int
 		otpSecret sql.NullString
 		dues      int
+		disabled  int
 	)
 
-	err := s.db.QueryRowContext(ctx, query, hash).Scan(&tokenID, &tokenHash, &expires, &consumed, &userID, &email, &name, &admin, &otpSecret, &dues)
+	err := s.db.QueryRowContext(ctx, query, hash).Scan(&tokenID, &tokenHash, &expires, &consumed, &userID, &email, &name, &admin, &otpSecret, &dues, &disabled)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, errInvalidToken
@@ -426,10 +446,14 @@ func (s *Server) lookupLoginTokenByHash(ctx context.Context, hash string) (*logi
 			DisplayName: name,
 			Admin:       admin == 1,
 			DuesCurrent: dues == 1,
+			Disabled:    disabled == 1,
 		},
 	}
 	if otpSecret.Valid {
 		ticket.User.OTPSecret = strings.TrimSpace(otpSecret.String)
+	}
+	if ticket.User.Disabled {
+		return nil, errInvalidToken
 	}
 	return ticket, nil
 }

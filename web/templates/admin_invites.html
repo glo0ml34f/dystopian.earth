@@ -4,8 +4,25 @@
 
 {{define "content"}}
 <section class="panel">
-    <h1>Invite Codes</h1>
-    <p>Use this area to mint new invite codes after verifying CTF submissions.</p>
-    <p>Provide generation logic tied to your preferred challenge verifier.</p>
+    <h1>Invite JWT Generator</h1>
+    <p>Sign arbitrary claims with the current invite secret. Defaults are applied for <code>aud</code>, <code>iat</code>, and <code>exp</code> when omitted.</p>
+    {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+    {{if .Message}}<p class="info">{{.Message}}</p>{{end}}
+    <form method="post" class="stack">
+        <label>Claims JSON
+            <textarea name="claims" rows="8" required>{{if .ClaimsInput}}{{.ClaimsInput}}{{else}}{"handle":"friend","email":"friend@example.com"}{{end}}</textarea>
+        </label>
+        <button type="submit">Generate Invite Token</button>
+    </form>
+    {{if .InviteToken}}
+    <div class="token-output">
+        <h2>Signed Token</h2>
+        <textarea readonly rows="4">{{.InviteToken}}</textarea>
+        {{if .ClaimsOutput}}
+        <h3>Claims Signed</h3>
+        <pre>{{.ClaimsOutput}}</pre>
+        {{end}}
+    </div>
+    {{end}}
 </section>
 {{end}}

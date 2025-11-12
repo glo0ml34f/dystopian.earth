@@ -1,0 +1,76 @@
+{{define "admin_dashboard.html"}}
+{{template "layout" .}}
+{{end}}
+
+{{define "content"}}
+<section class="panel">
+    <h1>Administrator Console</h1>
+    <p>Manage member accounts, invites, and infrastructure from one place.</p>
+    {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+    {{if .Message}}<p class="info">{{.Message}}</p>{{end}}
+    {{if .Users}}
+    <table class="wide">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>Email</th>
+                <th>Roles</th>
+                <th>Dues</th>
+                <th>Status</th>
+                <th>Created</th>
+                <th>Approved</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        {{range .Users}}
+            <tr>
+                <td>#{{.ID}}</td>
+                <td>{{.DisplayName}}</td>
+                <td>{{.Email}}</td>
+                <td>{{if .Admin}}Admin{{else}}Member{{end}}</td>
+                <td>{{if .DuesCurrent}}Current{{else}}Past Due{{end}}</td>
+                <td>{{if .Disabled}}Disabled{{else}}Active{{end}}</td>
+                <td>{{.CreatedAt.Format "2006-01-02"}}</td>
+                <td>{{if .ApprovedAt}}{{.ApprovedAt.Format "2006-01-02"}}{{else}}—{{end}}</td>
+                <td class="stack">
+                    <a class="button" href="/admin/users/{{.ID}}">View</a>
+                    <form method="post" action="/admin/users/{{.ID}}/promote">
+                        <button type="submit" {{if .Admin}}disabled{{end}}>Promote</button>
+                    </form>
+                    <form method="post" action="/admin/users/{{.ID}}/toggle-disable">
+                        <button type="submit">{{if .Disabled}}Enable{{else}}Disable{{end}}</button>
+                    </form>
+                    <form method="post" action="/admin/users/{{.ID}}/delete" onsubmit="return confirm('Delete {{.DisplayName}}? This cannot be undone.');">
+                        <button type="submit" class="danger">Delete</button>
+                    </form>
+                </td>
+            </tr>
+        {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <p>No users have registered yet.</p>
+    {{end}}
+</section>
+
+<section class="panel">
+    <h2>Test Email Delivery</h2>
+    {{if not .MailerConfigured}}
+    <p class="error">Email service is not configured, so test messages cannot be sent.</p>
+    {{end}}
+    <form method="post" action="/admin/email/test" class="stack">
+        <label>Recipient
+            <input type="email" name="to" placeholder="admin@example.com">
+        </label>
+        <label>Subject
+            <input type="text" name="subject" placeholder="dystopian.earth mailer test">
+        </label>
+        <label>Message
+            <textarea name="body" rows="4" placeholder="This is a test email from the dystopian.earth admin console."></textarea>
+        </label>
+        <button type="submit" {{if not .MailerConfigured}}disabled{{end}}>Send Test Email</button>
+    </form>
+</section>
+{{end}}
