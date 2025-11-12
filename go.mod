@@ -11,6 +11,7 @@ require (
 	github.com/pquerna/otp v1.5.0
 	github.com/yuin/goldmark v1.7.13
 	golang.org/x/crypto v0.44.0
+	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
 	modernc.org/sqlite v1.40.0
 )
 

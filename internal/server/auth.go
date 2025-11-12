@@ -17,6 +17,8 @@ import (
 
 	"github.com/pquerna/otp/totp"
 	"golang.org/x/crypto/bcrypt"
+
+	"dystopian.earth/internal/email"
 )
 
 const (
@@ -37,6 +39,7 @@ type authUser struct {
 	DisplayName string
 	Admin       bool
 	OTPSecret   string
+	DuesCurrent bool
 }
 
 type loginTicket struct {
@@ -277,6 +280,7 @@ func (s *Server) establishSession(ctx context.Context, user authUser) {
 	s.sessions.Put(ctx, "email", user.Email)
 	s.sessions.Put(ctx, "display_name", user.DisplayName)
 	s.sessions.Put(ctx, "is_admin", user.Admin)
+	s.sessions.Put(ctx, "dues_current", user.DuesCurrent)
 }
 
 func (s *Server) clearPendingLogin(ctx context.Context) {
@@ -287,7 +291,7 @@ func (s *Server) clearPendingLogin(ctx context.Context) {
 }
 
 func (s *Server) lookupUserByEmail(ctx context.Context, email string) (authUser, string, error) {
-	const query = `SELECT id, email, display_name, is_admin, otp_secret, password_hash FROM users WHERE email = ?`
+	const query = `SELECT id, email, display_name, is_admin, otp_secret, password_hash, dues_current FROM users WHERE email = ?`
 
 	var (
 		id          int
@@ -296,9 +300,10 @@ func (s *Server) lookupUserByEmail(ctx context.Context, email string) (authUser,
 		isAdmin     int
 		otpSecret   sql.NullString
 		password    sql.NullString
+		dues        int
 	)
 
-	err := s.db.QueryRowContext(ctx, query, email).Scan(&id, &dbEmail, &displayName, &isAdmin, &otpSecret, &password)
+	err := s.db.QueryRowContext(ctx, query, email).Scan(&id, &dbEmail, &displayName, &isAdmin, &otpSecret, &password, &dues)
 	if err != nil {
 		return authUser{}, "", err
 	}
@@ -308,6 +313,7 @@ func (s *Server) lookupUserByEmail(ctx context.Context, email string) (authUser,
 		Email:       dbEmail,
 		DisplayName: displayName,
 		Admin:       isAdmin == 1,
+		DuesCurrent: dues == 1,
 	}
 	if otpSecret.Valid {
 		user.OTPSecret = strings.TrimSpace(otpSecret.String)
@@ -346,7 +352,7 @@ func (s *Server) lookupLoginToken(ctx context.Context, token string) (*loginTick
 }
 
 func (s *Server) lookupLoginTokenByID(ctx context.Context, id int) (*loginTicket, error) {
-	const query = `SELECT lt.id, lt.token_hash, lt.expires_at, lt.consumed_at, u.id, u.email, u.display_name, u.is_admin, u.otp_secret FROM login_tokens lt JOIN users u ON u.id = lt.user_id WHERE lt.id = ?`
+	const query = `SELECT lt.id, lt.token_hash, lt.expires_at, lt.consumed_at, u.id, u.email, u.display_name, u.is_admin, u.otp_secret, u.dues_current FROM login_tokens lt JOIN users u ON u.id = lt.user_id WHERE lt.id = ?`
 
 	var (
 		tokenID   int
@@ -358,9 +364,10 @@ func (s *Server) lookupLoginTokenByID(ctx context.Context, id int) (*loginTicket
 		name      string
 		admin     int
 		otpSecret sql.NullString
+		dues      int
 	)
 
-	err := s.db.QueryRowContext(ctx, query, id).Scan(&tokenID, &tokenHash, &expires, &consumed, &userID, &email, &name, &admin, &otpSecret)
+	err := s.db.QueryRowContext(ctx, query, id).Scan(&tokenID, &tokenHash, &expires, &consumed, &userID, &email, &name, &admin, &otpSecret, &dues)
 	if err != nil {
 		return nil, err
 	}
@@ -375,6 +382,7 @@ func (s *Server) lookupLoginTokenByID(ctx context.Context, id int) (*loginTicket
 			Email:       email,
 			DisplayName: name,
 			Admin:       admin == 1,
+			DuesCurrent: dues == 1,
 		},
 	}
 	if otpSecret.Valid {
@@ -384,7 +392,7 @@ func (s *Server) lookupLoginTokenByID(ctx context.Context, id int) (*loginTicket
 }
 
 func (s *Server) lookupLoginTokenByHash(ctx context.Context, hash string) (*loginTicket, error) {
-	const query = `SELECT lt.id, lt.token_hash, lt.expires_at, lt.consumed_at, u.id, u.email, u.display_name, u.is_admin, u.otp_secret FROM login_tokens lt JOIN users u ON u.id = lt.user_id WHERE lt.token_hash = ?`
+	const query = `SELECT lt.id, lt.token_hash, lt.expires_at, lt.consumed_at, u.id, u.email, u.display_name, u.is_admin, u.otp_secret, u.dues_current FROM login_tokens lt JOIN users u ON u.id = lt.user_id WHERE lt.token_hash = ?`
 
 	var (
 		tokenID   int
@@ -396,9 +404,10 @@ func (s *Server) lookupLoginTokenByHash(ctx context.Context, hash string) (*logi
 		name      string
 		admin     int
 		otpSecret sql.NullString
+		dues      int
 	)
 
-	err := s.db.QueryRowContext(ctx, query, hash).Scan(&tokenID, &tokenHash, &expires, &consumed, &userID, &email, &name, &admin, &otpSecret)
+	err := s.db.QueryRowContext(ctx, query, hash).Scan(&tokenID, &tokenHash, &expires, &consumed, &userID, &email, &name, &admin, &otpSecret, &dues)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, errInvalidToken
@@ -416,6 +425,7 @@ func (s *Server) lookupLoginTokenByHash(ctx context.Context, hash string) (*logi
 			Email:       email,
 			DisplayName: name,
 			Admin:       admin == 1,
+			DuesCurrent: dues == 1,
 		},
 	}
 	if otpSecret.Valid {
@@ -429,7 +439,18 @@ func (s *Server) markLoginTokenUsed(ctx context.Context, tokenID int) error {
 	return err
 }
 
-func (s *Server) sendLoginLink(r *http.Request, email, token, next string) {
+func (s *Server) sendLoginLink(r *http.Request, recipient, token, next string) {
+	link := s.loginLinkURL(r, token, next)
+	if s.mailer != nil && s.mailer.Enabled() {
+		subject := "Your dystopian.earth login link"
+		body := fmt.Sprintf("Hello!\n\nUse the following link to access your account: %s\n\nThis link expires in %s. If you did not request it, you can ignore this message.\n", link, memberLoginTTL.String())
+		s.mailer.Send(email.Message{To: []string{recipient}, Subject: subject, Body: body})
+		return
+	}
+	log.Printf("login link for %s: %s", recipient, link)
+}
+
+func (s *Server) loginLinkURL(r *http.Request, token, next string) string {
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
@@ -448,7 +469,7 @@ func (s *Server) sendLoginLink(r *http.Request, email, token, next string) {
 	if next != "" {
 		link += "&next=" + url.QueryEscape(next)
 	}
-	log.Printf("login link for %s: %s", email, link)
+	return link
 }
 
 func sanitizeRedirect(target, fallback string) string {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"log"
 	"os"
 	"strconv"
@@ -19,6 +20,15 @@ type Config struct {
 	ContentDir    string
 	TemplatesDir  string
 	StaticDir     string
+	SMTPHost      string
+	SMTPPort      int
+	SMTPUsername  string
+	SMTPToken     string
+	SMTPUseTLS    bool
+	EmailFrom     string
+	AdminEmail    string
+	EncryptionKey []byte
+	MaxInvites    int
 }
 
 // FromEnv loads configuration from environment variables and applies sensible defaults.
@@ -33,6 +43,14 @@ func FromEnv() Config {
 		ContentDir:    getEnv("PORTAL_CONTENT_DIR", "content"),
 		TemplatesDir:  getEnv("PORTAL_TEMPLATES_DIR", "web/templates"),
 		StaticDir:     getEnv("PORTAL_STATIC_DIR", "web/static"),
+		SMTPHost:      getEnv("PORTAL_SMTP_HOST", ""),
+		SMTPPort:      MustEnvInt("PORTAL_SMTP_PORT", 0),
+		SMTPUsername:  getEnv("PORTAL_SMTP_USERNAME", ""),
+		SMTPToken:     getEnv("PORTAL_SMTP_TOKEN", ""),
+		SMTPUseTLS:    getEnv("PORTAL_SMTP_TLS", "true") != "false",
+		EmailFrom:     getEnv("PORTAL_EMAIL_FROM", ""),
+		AdminEmail:    getEnv("PORTAL_ADMIN_EMAIL", ""),
+		MaxInvites:    MustEnvInt("PORTAL_MEMBER_INVITES", 10),
 	}
 
 	ttl := getEnv("PORTAL_SESSION_TTL", "720h")
@@ -42,6 +60,18 @@ func FromEnv() Config {
 		d = 720 * time.Hour
 	}
 	cfg.SessionTTL = d
+
+	key := getEnv("PORTAL_ENCRYPTION_KEY", "")
+	if key != "" {
+		decoded, err := base64.StdEncoding.DecodeString(key)
+		if err != nil {
+			log.Printf("invalid PORTAL_ENCRYPTION_KEY: %v", err)
+		} else if len(decoded) != 32 {
+			log.Printf("PORTAL_ENCRYPTION_KEY must decode to 32 bytes, got %d", len(decoded))
+		} else {
+			cfg.EncryptionKey = decoded
+		}
+	}
 
 	return cfg
 }

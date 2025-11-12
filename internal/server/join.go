@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,7 +56,7 @@ func (s *Server) postJoin(w http.ResponseWriter, r *http.Request) {
 		Introduction: strings.TrimSpace(r.FormValue("introduction")),
 	}
 
-	errs := validateJoinForm(s, form)
+	errs := validateJoinForm(r.Context(), s, form)
 	if len(errs) > 0 {
 		s.renderTemplate(w, r, "join.html", map[string]any{
 			"Title":            "Join the Collective",
@@ -67,7 +69,8 @@ func (s *Server) postJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.saveJoinRequest(r, form); err != nil {
+	regID, err := s.saveJoinRequest(r.Context(), form)
+	if err != nil {
 		s.renderTemplate(w, r, "join.html", map[string]any{
 			"Title":            "Join the Collective",
 			"Error":            "Failed to record your request. Please retry soon.",
@@ -79,6 +82,8 @@ func (s *Server) postJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.notifyAdminsOfRegistration(r.Context(), regID, form)
+
 	s.renderTemplate(w, r, "join.html", map[string]any{
 		"Title":            "Join the Collective",
 		"Success":          "Request received. Our moderators will contact you after review.",
@@ -89,7 +94,7 @@ func (s *Server) postJoin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func validateJoinForm(s *Server, form joinForm) []string {
+func validateJoinForm(ctx context.Context, s *Server, form joinForm) []string {
 	var errs []string
 
 	if form.Handle == "" {
@@ -122,6 +127,13 @@ func validateJoinForm(s *Server, form joinForm) []string {
 				errs = append(errs, "Invite token email does not match your submission.")
 			}
 		}
+	} else {
+		ok, err := s.inviteCodeAvailable(ctx, form.InviteCode)
+		if err != nil {
+			errs = append(errs, "Unable to validate that invite code right now.")
+		} else if !ok {
+			errs = append(errs, "That invite code has already been used or has expired.")
+		}
 	}
 
 	if form.Introduction == "" {
@@ -137,16 +149,19 @@ func validateJoinForm(s *Server, form joinForm) []string {
 	return errs
 }
 
-func (s *Server) saveJoinRequest(r *http.Request, form joinForm) error {
-	ctx := r.Context()
+func (s *Server) saveJoinRequest(ctx context.Context, form joinForm) (int64, error) {
 	const stmt = `INSERT INTO registrations (email, display_name, invite_code, challenge_answer, ssh_pubkey, introduction)
 VALUES (?, ?, ?, ?, ?, ?)`
 
-	_, err := s.db.ExecContext(ctx, stmt, form.Email, form.Handle, form.InviteCode, form.Introduction, nullIfEmpty(form.SSHPubKey), form.Introduction)
+	res, err := s.db.ExecContext(ctx, stmt, form.Email, form.Handle, form.InviteCode, form.Introduction, nullIfEmpty(form.SSHPubKey), form.Introduction)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	return nil
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func nullIfEmpty(v string) any {
@@ -154,6 +169,26 @@ func nullIfEmpty(v string) any {
 		return nil
 	}
 	return v
+}
+
+func (s *Server) inviteCodeAvailable(ctx context.Context, code string) (bool, error) {
+	const query = `SELECT used_at, expires_at FROM invite_codes WHERE code = ?`
+	var used sql.NullTime
+	var expires sql.NullTime
+	err := s.db.QueryRowContext(ctx, query, code).Scan(&used, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if used.Valid {
+		return false, nil
+	}
+	if expires.Valid && time.Now().After(expires.Time) {
+		return false, nil
+	}
+	return true, nil
 }
 
 type flagMintRequest struct {

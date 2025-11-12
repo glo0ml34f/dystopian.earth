@@ -5,7 +5,53 @@
 {{define "content"}}
 <section class="panel">
     <h1>Pending Registrations</h1>
-    <p>This is a placeholder for the registration review queue.</p>
-    <p>Implement fetching submissions and approve/reject actions using the storage layer.</p>
+    {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+    {{if .Message}}<p class="info">{{.Message}}</p>{{end}}
+    {{if .Registrations}}
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Display Name</th>
+                <th>Email</th>
+                <th>Invite</th>
+                <th>Introduction</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        {{range .Registrations}}
+            <tr>
+                <td>#{{.ID}}</td>
+                <td>{{.DisplayName}}</td>
+                <td>{{.Email}}</td>
+                <td><code>{{.InviteCode}}</code></td>
+                <td>
+                    <details>
+                        <summary>Show details</summary>
+                        <p><strong>Challenge:</strong> {{.ChallengeAnswer}}</p>
+                        {{if .SSHPubKey}}<p><strong>SSH:</strong> <code>{{.SSHPubKey}}</code></p>{{end}}
+                        <p><strong>Introduction:</strong><br>{{.Introduction}}</p>
+                    </details>
+                </td>
+                <td>
+                    <form method="post" action="/admin/registrations/{{.ID}}/approve" style="margin-bottom:0.5rem;">
+                        <button type="submit">Approve</button>
+                    </form>
+                    <form method="post" action="/admin/registrations/{{.ID}}/reject">
+                        <input type="hidden" name="id" value="{{.ID}}">
+                        <label>Note
+                            <input type="text" name="note" maxlength="1000" placeholder="Optional rejection note">
+                        </label>
+                        <button type="submit" class="secondary">Reject</button>
+                    </form>
+                </td>
+            </tr>
+        {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <p>No pending registrations.</p>
+    {{end}}
 </section>
 {{end}}

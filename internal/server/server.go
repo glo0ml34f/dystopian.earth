@@ -2,12 +2,17 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,9 +21,14 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gomodule/redigo/redis"
+	"github.com/pquerna/otp/totp"
 
 	"dystopian.earth/internal/config"
+	"dystopian.earth/internal/email"
 	"dystopian.earth/internal/markdown"
+	"dystopian.earth/internal/secure"
+	"golang.org/x/crypto/bcrypt"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 // Server holds the HTTP server state.
@@ -31,6 +41,8 @@ type Server struct {
 	contentFS fs.FS
 	redisPool *redis.Pool
 	inviteJWT *inviteTokenManager
+	mailer    *email.Service
+	cipher    *secure.Cipher
 }
 
 // New creates a new server instance.
@@ -71,6 +83,25 @@ func New(cfg config.Config, db *sql.DB, templates Templates) (*Server, error) {
 		return nil, fmt.Errorf("init invite tokens: %w", err)
 	}
 
+	var cipher *secure.Cipher
+	if len(cfg.EncryptionKey) == 32 {
+		c, err := secure.NewCipher(cfg.EncryptionKey)
+		if err != nil {
+			return nil, fmt.Errorf("init cipher: %w", err)
+		}
+		cipher = c
+	}
+
+	mailer := email.New(email.Config{
+		Host:     cfg.SMTPHost,
+		Port:     cfg.SMTPPort,
+		Username: cfg.SMTPUsername,
+		Token:    cfg.SMTPToken,
+		UseTLS:   cfg.SMTPUseTLS,
+		From:     cfg.EmailFrom,
+		Queue:    64,
+	})
+
 	return &Server{
 		cfg:       cfg,
 		db:        db,
@@ -80,6 +111,8 @@ func New(cfg config.Config, db *sql.DB, templates Templates) (*Server, error) {
 		contentFS: content,
 		redisPool: pool,
 		inviteJWT: tokens,
+		mailer:    mailer,
+		cipher:    cipher,
 	}, nil
 }
 
@@ -116,7 +149,11 @@ func (s *Server) Routes() http.Handler {
 		protected.Use(s.authMiddleware)
 		protected.Get("/dashboard", s.dashboard)
 		protected.Post("/profile", s.updateProfile)
+		protected.Post("/profile/otp", s.updateOTP)
+		protected.Post("/profile/ldap", s.updateLDAP)
+		protected.Post("/profile/wireguard", s.generateWireguard)
 		protected.Post("/payment", s.updatePayment)
+		protected.Post("/invites", s.createMemberInvite)
 	})
 
 	r.Group(func(admin chi.Router) {
@@ -234,35 +271,482 @@ func (s *Server) getLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
-	s.renderTemplate(w, r, "dashboard.html", map[string]any{
-		"User": s.currentUser(r.Context()),
-	})
+	s.renderDashboard(w, r, nil)
 }
 
 func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
-	s.renderTemplate(w, r, "dashboard.html", map[string]any{
-		"Message": "profile update stub",
-		"User":    s.currentUser(r.Context()),
+	user := s.currentUser(r.Context())
+	if user == nil {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	if !user.DuesCurrent {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "You must be current on dues before updating your profile.",
+		})
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unable to read your submission. Please try again.",
+		})
+		return
+	}
+
+	displayName := strings.TrimSpace(r.PostFormValue("display_name"))
+	bio := strings.TrimSpace(r.PostFormValue("bio"))
+	ssh := strings.TrimSpace(r.PostFormValue("ssh_pubkey"))
+	intro := strings.TrimSpace(r.PostFormValue("introduction"))
+
+	if displayName == "" {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Display name is required.",
+		})
+		return
+	}
+	if len(displayName) > 64 {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Display name must be 64 characters or fewer.",
+		})
+		return
+	}
+	if len(bio) > 1024 {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Bio is too long.",
+		})
+		return
+	}
+	if len(ssh) > 4096 {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "SSH public key is unexpectedly long.",
+		})
+		return
+	}
+	if len(intro) > 1200 {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Introduction must be 1200 characters or fewer.",
+		})
+		return
+	}
+
+	_, err := s.db.ExecContext(r.Context(), `UPDATE users SET display_name = ?, bio = ?, ssh_pubkey = ?, introduction = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, displayName, bio, ssh, intro, user.ID)
+	if err != nil {
+		log.Printf("update profile: %v", err)
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "We could not save your profile changes.",
+		})
+		return
+	}
+	s.sessions.Put(r.Context(), "display_name", displayName)
+	s.renderDashboard(w, r, map[string]any{
+		"Message": "Profile updated.",
 	})
 }
 
 func (s *Server) updatePayment(w http.ResponseWriter, r *http.Request) {
-	s.renderTemplate(w, r, "dashboard.html", map[string]any{
-		"Message": "payment update stub",
-		"User":    s.currentUser(r.Context()),
+	user := s.currentUser(r.Context())
+	if user == nil {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	if !user.DuesCurrent {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "You must be current on dues to update payment details.",
+		})
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unable to read your submission.",
+		})
+		return
+	}
+
+	provider := strings.TrimSpace(r.PostFormValue("payment_provider"))
+	reference := strings.TrimSpace(r.PostFormValue("payment_ref"))
+	if len(provider) > 120 {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Provider description is too long.",
+		})
+		return
+	}
+	if len(reference) > 200 {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Reference is too long.",
+		})
+		return
+	}
+
+	_, err := s.db.ExecContext(r.Context(), `UPDATE users SET payment_provider = ?, payment_ref = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, provider, reference, user.ID)
+	if err != nil {
+		log.Printf("update payment: %v", err)
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "We were unable to save payment details.",
+		})
+		return
+	}
+
+	s.renderDashboard(w, r, map[string]any{
+		"Message": "Payment preferences saved.",
+	})
+}
+
+func (s *Server) updateOTP(w http.ResponseWriter, r *http.Request) {
+	user := s.currentUser(r.Context())
+	if user == nil {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	if !user.DuesCurrent {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Bring your dues current to manage one-time passwords.",
+		})
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unable to read your submission.",
+		})
+		return
+	}
+
+	action := strings.TrimSpace(r.PostFormValue("action"))
+	switch action {
+	case "enable":
+		key, err := totp.Generate(totp.GenerateOpts{Issuer: "dystopian.earth", AccountName: user.Email})
+		if err != nil {
+			log.Printf("generate otp secret: %v", err)
+			s.renderDashboard(w, r, map[string]any{
+				"Error": "Unable to generate an OTP secret.",
+			})
+			return
+		}
+		secret := key.Secret()
+		_, err = s.db.ExecContext(r.Context(), `UPDATE users SET otp_secret = ?, otp_enabled_at = CURRENT_TIMESTAMP WHERE id = ?`, secret, user.ID)
+		if err != nil {
+			log.Printf("store otp secret: %v", err)
+			s.renderDashboard(w, r, map[string]any{
+				"Error": "Failed to store the OTP secret.",
+			})
+			return
+		}
+		s.renderDashboard(w, r, map[string]any{
+			"Message":   "Authenticator secret generated. Configure your app right away.",
+			"OTPSecret": secret,
+			"OTPURI":    key.URL(),
+		})
+	case "disable":
+		_, err := s.db.ExecContext(r.Context(), `UPDATE users SET otp_secret = '', otp_enabled_at = NULL WHERE id = ?`, user.ID)
+		if err != nil {
+			log.Printf("disable otp: %v", err)
+			s.renderDashboard(w, r, map[string]any{
+				"Error": "We could not disable OTP for this account.",
+			})
+			return
+		}
+		s.renderDashboard(w, r, map[string]any{
+			"Message": "One-time passwords disabled.",
+		})
+	default:
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unsupported OTP action.",
+		})
+	}
+}
+
+func (s *Server) updateLDAP(w http.ResponseWriter, r *http.Request) {
+	user := s.currentUser(r.Context())
+	if user == nil {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	if !user.DuesCurrent {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Bring your dues current to manage LDAP credentials.",
+		})
+		return
+	}
+	if s.cipher == nil {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Server is not configured with an encryption key for LDAP passwords.",
+		})
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unable to read your submission.",
+		})
+		return
+	}
+
+	action := strings.TrimSpace(r.PostFormValue("action"))
+	switch action {
+	case "clear":
+		_, err := s.db.ExecContext(r.Context(), `UPDATE users SET ldap_password_encrypted = '' WHERE id = ?`, user.ID)
+		if err != nil {
+			log.Printf("clear ldap password: %v", err)
+			s.renderDashboard(w, r, map[string]any{
+				"Error": "Unable to clear the LDAP password.",
+			})
+			return
+		}
+		s.renderDashboard(w, r, map[string]any{
+			"Message": "LDAP password cleared.",
+		})
+	case "set":
+		password := r.PostFormValue("ldap_password")
+		if strings.TrimSpace(password) == "" {
+			s.renderDashboard(w, r, map[string]any{
+				"Error": "Provide a password to store.",
+			})
+			return
+		}
+		if len(password) < 8 {
+			s.renderDashboard(w, r, map[string]any{
+				"Error": "Passwords must be at least 8 characters.",
+			})
+			return
+		}
+		encrypted, err := s.cipher.Encrypt([]byte(password))
+		if err != nil {
+			log.Printf("encrypt ldap password: %v", err)
+			s.renderDashboard(w, r, map[string]any{
+				"Error": "Unable to encrypt the password.",
+			})
+			return
+		}
+		_, err = s.db.ExecContext(r.Context(), `UPDATE users SET ldap_password_encrypted = ? WHERE id = ?`, encrypted, user.ID)
+		if err != nil {
+			log.Printf("store ldap password: %v", err)
+			s.renderDashboard(w, r, map[string]any{
+				"Error": "Unable to store the LDAP password.",
+			})
+			return
+		}
+		s.renderDashboard(w, r, map[string]any{
+			"Message": "LDAP password saved securely.",
+		})
+	default:
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unsupported LDAP action.",
+		})
+	}
+}
+
+func (s *Server) generateWireguard(w http.ResponseWriter, r *http.Request) {
+	user := s.currentUser(r.Context())
+	if user == nil {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	if !user.DuesCurrent {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Bring your dues current to generate VPN credentials.",
+		})
+		return
+	}
+	if s.cipher == nil {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Server is not configured with an encryption key for VPN credentials.",
+		})
+		return
+	}
+
+	privateKey, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		log.Printf("wireguard private key: %v", err)
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unable to generate a WireGuard keypair.",
+		})
+		return
+	}
+	preshared, err := wgtypes.GenerateKey()
+	if err != nil {
+		log.Printf("wireguard preshared: %v", err)
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unable to generate a WireGuard pre-shared key.",
+		})
+		return
+	}
+	password, err := randomPassword()
+	if err != nil {
+		log.Printf("wireguard password: %v", err)
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unable to mint a password for your WireGuard config.",
+		})
+		return
+	}
+
+	config := fmt.Sprintf(`[Interface]
+PrivateKey = %s
+Address = 10.66.0.2/32
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = <portal-public-key>
+PresharedKey = %s
+Endpoint = vpn.dystopian.earth:51820
+AllowedIPs = 0.0.0.0/0, ::/0
+`, privateKey.String(), preshared.String())
+
+	encryptedConfig, err := s.cipher.Encrypt([]byte(config))
+	if err != nil {
+		log.Printf("encrypt wireguard config: %v", err)
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unable to encrypt the WireGuard configuration.",
+		})
+		return
+	}
+	encryptedPassword, err := s.cipher.Encrypt([]byte(password))
+	if err != nil {
+		log.Printf("encrypt wireguard password: %v", err)
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unable to store the WireGuard password.",
+		})
+		return
+	}
+
+	_, err = s.db.ExecContext(r.Context(), `UPDATE users SET wireguard_config_encrypted = ?, wireguard_password_encrypted = ? WHERE id = ?`, encryptedConfig, encryptedPassword, user.ID)
+	if err != nil {
+		log.Printf("store wireguard config: %v", err)
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unable to store the WireGuard configuration.",
+		})
+		return
+	}
+
+	s.renderDashboard(w, r, map[string]any{
+		"Message":           "WireGuard credentials generated. Save this password in a secure place.",
+		"WireguardConfig":   config,
+		"WireguardPassword": password,
+	})
+}
+
+func (s *Server) createMemberInvite(w http.ResponseWriter, r *http.Request) {
+	user := s.currentUser(r.Context())
+	if user == nil {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	if !user.DuesCurrent {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Bring your dues current before generating invite codes.",
+		})
+		return
+	}
+	if s.cfg.MaxInvites > 0 {
+		count, err := s.countMemberInvites(r.Context(), user.ID)
+		if err != nil {
+			log.Printf("count invites: %v", err)
+			s.renderDashboard(w, r, map[string]any{
+				"Error": "Unable to check invite limits at this time.",
+			})
+			return
+		}
+		if count >= s.cfg.MaxInvites {
+			s.renderDashboard(w, r, map[string]any{
+				"Error": "You have reached the invite limit. Contact an admin for more.",
+			})
+			return
+		}
+	}
+
+	var code string
+	var err error
+	for attempts := 0; attempts < 3; attempts++ {
+		code, err = generateInviteCode()
+		if err != nil {
+			break
+		}
+		_, err = s.db.ExecContext(r.Context(), `INSERT INTO invite_codes (code, created_by) VALUES (?, ?)`, code, user.ID)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		log.Printf("create invite code: %v", err)
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unable to generate an invite code right now.",
+		})
+		return
+	}
+
+	s.renderDashboard(w, r, map[string]any{
+		"Message":   "Invite code minted successfully.",
+		"NewInvite": code,
 	})
 }
 
 func (s *Server) listRegistrations(w http.ResponseWriter, r *http.Request) {
-	s.renderTemplate(w, r, "admin_registrations.html", map[string]any{})
+	regs, err := s.pendingRegistrations(r.Context())
+	if err != nil {
+		log.Printf("list registrations: %v", err)
+		s.renderError(w, r, http.StatusInternalServerError, "Unable to load registrations")
+		return
+	}
+	data := map[string]any{
+		"Registrations": regs,
+	}
+	switch r.URL.Query().Get("status") {
+	case "approved":
+		data["Message"] = "Registration approved and welcome email sent."
+	case "rejected":
+		data["Message"] = "Registration rejected."
+	case "error":
+		data["Error"] = "Unable to update that registration."
+	}
+	s.renderTemplate(w, r, "admin_registrations.html", data)
 }
 
 func (s *Server) approveRegistration(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusNoContent)
+	adminID := s.sessions.GetInt(r.Context(), "user_id")
+	if adminID == 0 {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Error(w, "invalid registration id", http.StatusBadRequest)
+		return
+	}
+
+	token, email, name, err := s.finalizeRegistration(r.Context(), id, adminID)
+	if err != nil {
+		log.Printf("approve registration %d: %v", id, err)
+		http.Redirect(w, r, "/admin/registrations?status=error", http.StatusSeeOther)
+		return
+	}
+	if token != "" {
+		s.sendWelcomeEmail(r, email, name, token)
+	}
+	http.Redirect(w, r, "/admin/registrations?status=approved", http.StatusSeeOther)
 }
 
 func (s *Server) rejectRegistration(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusNoContent)
+	adminID := s.sessions.GetInt(r.Context(), "user_id")
+	if adminID == 0 {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Redirect(w, r, "/admin/registrations?status=error", http.StatusSeeOther)
+		return
+	}
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		http.Redirect(w, r, "/admin/registrations?status=error", http.StatusSeeOther)
+		return
+	}
+	note := strings.TrimSpace(r.PostFormValue("note"))
+	if len(note) > 1000 {
+		note = note[:1000]
+	}
+	if err := s.setRegistrationStatus(r.Context(), id, adminID, "rejected", note); err != nil {
+		log.Printf("reject registration %d: %v", id, err)
+		http.Redirect(w, r, "/admin/registrations?status=error", http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/admin/registrations?status=rejected", http.StatusSeeOther)
 }
 
 func (s *Server) listInvites(w http.ResponseWriter, r *http.Request) {
@@ -271,6 +755,306 @@ func (s *Server) listInvites(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createInvite(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusCreated)
+}
+
+type registrationEntry struct {
+	ID              int
+	Email           string
+	DisplayName     string
+	InviteCode      string
+	ChallengeAnswer string
+	SSHPubKey       string
+	Introduction    string
+	CreatedAt       time.Time
+}
+
+func (s *Server) pendingRegistrations(ctx context.Context) ([]registrationEntry, error) {
+	const query = `SELECT id, email, display_name, invite_code, challenge_answer, ssh_pubkey, introduction, created_at FROM registrations WHERE status = 'pending' ORDER BY created_at`
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var regs []registrationEntry
+	for rows.Next() {
+		var entry registrationEntry
+		if err := rows.Scan(&entry.ID, &entry.Email, &entry.DisplayName, &entry.InviteCode, &entry.ChallengeAnswer, &entry.SSHPubKey, &entry.Introduction, &entry.CreatedAt); err != nil {
+			return nil, err
+		}
+		regs = append(regs, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return regs, nil
+}
+
+func (s *Server) finalizeRegistration(ctx context.Context, regID, adminID int) (string, string, string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", "", "", err
+	}
+	defer tx.Rollback()
+
+	const selectSQL = `SELECT status, email, display_name, invite_code, ssh_pubkey, introduction FROM registrations WHERE id = ?`
+	var (
+		status     string
+		email      string
+		name       string
+		inviteCode string
+		sshKey     sql.NullString
+		intro      sql.NullString
+	)
+	if err := tx.QueryRowContext(ctx, selectSQL, regID).Scan(&status, &email, &name, &inviteCode, &sshKey, &intro); err != nil {
+		return "", "", "", err
+	}
+	if status != "pending" {
+		return "", "", "", fmt.Errorf("registration %d is not pending", regID)
+	}
+
+	var existing int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(1) FROM users WHERE email = ?`, email).Scan(&existing); err != nil {
+		return "", "", "", err
+	}
+	if existing > 0 {
+		return "", "", "", fmt.Errorf("user with email %s already exists", email)
+	}
+
+	tempPassword, err := randomPassword()
+	if err != nil {
+		return "", "", "", err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(tempPassword), bcrypt.MinCost)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	sshValue := ""
+	if sshKey.Valid {
+		sshValue = sshKey.String
+	}
+	introValue := ""
+	if intro.Valid {
+		introValue = intro.String
+	}
+
+	res, err := tx.ExecContext(ctx, `INSERT INTO users (email, password_hash, display_name, bio, payment_provider, payment_ref, approved_at, ssh_pubkey, introduction, dues_current) VALUES (?, ?, ?, ?, '', '', CURRENT_TIMESTAMP, ?, ?, 0)`, email, string(hash), name, introValue, sshValue, introValue)
+	if err != nil {
+		return "", "", "", err
+	}
+	userID64, err := res.LastInsertId()
+	if err != nil {
+		return "", "", "", err
+	}
+	userID := int(userID64)
+
+	if strings.Count(inviteCode, ".") != 2 {
+		if _, err := tx.ExecContext(ctx, `UPDATE invite_codes SET used_by = ?, used_at = CURRENT_TIMESTAMP WHERE code = ? AND used_at IS NULL`, userID, inviteCode); err != nil {
+			return "", "", "", err
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `UPDATE registrations SET status = 'approved', reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ?`, adminID, regID); err != nil {
+		return "", "", "", err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", "", "", err
+	}
+
+	token, err := s.createLoginToken(ctx, userID)
+	if err != nil {
+		return "", "", "", err
+	}
+	return token, email, name, nil
+}
+
+func (s *Server) setRegistrationStatus(ctx context.Context, regID, adminID int, status, note string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE registrations SET status = ?, review_note = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'`, status, note, adminID, regID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("registration %d already processed", regID)
+	}
+	return nil
+}
+
+func (s *Server) adminEmails(ctx context.Context) ([]string, error) {
+	const query = `SELECT email FROM users WHERE is_admin = 1`
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var emails []string
+	for rows.Next() {
+		var email string
+		if err := rows.Scan(&email); err != nil {
+			return nil, err
+		}
+		email = strings.TrimSpace(email)
+		if email != "" {
+			emails = append(emails, email)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(emails) == 0 && s.cfg.AdminEmail != "" {
+		emails = append(emails, s.cfg.AdminEmail)
+	}
+	return emails, nil
+}
+
+func (s *Server) notifyAdminsOfRegistration(ctx context.Context, regID int64, form joinForm) {
+	if s.mailer == nil || !s.mailer.Enabled() {
+		log.Printf("registration %d submitted for %s <%s>", regID, form.Handle, form.Email)
+		return
+	}
+	emails, err := s.adminEmails(ctx)
+	if err != nil {
+		log.Printf("admin emails: %v", err)
+		return
+	}
+	if len(emails) == 0 {
+		return
+	}
+	subject := fmt.Sprintf("New membership application: %s", form.Handle)
+	body := fmt.Sprintf("A new membership request has been submitted.\n\nRequest #%d\nDisplay Name: %s\nEmail: %s\nInvite Code: %s\n\nIntroduction:\n%s\n", regID, form.Handle, form.Email, form.InviteCode, form.Introduction)
+	s.mailer.Send(email.Message{To: emails, Subject: subject, Body: body})
+}
+
+func (s *Server) sendWelcomeEmail(r *http.Request, emailAddr, name, token string) {
+	link := s.loginLinkURL(r, token, "")
+	if s.mailer != nil && s.mailer.Enabled() {
+		subject := fmt.Sprintf("Welcome to dystopian.earth, %s", name)
+		body := fmt.Sprintf("Hi %s,\n\nYour membership has been approved! Use this one-time sign-in link to access the member portal: %s\n\nThe link expires in %s. We're glad you're here.\n", name, link, memberLoginTTL.String())
+		s.mailer.Send(email.Message{To: []string{emailAddr}, Subject: subject, Body: body})
+		return
+	}
+	log.Printf("welcome link for %s: %s", emailAddr, link)
+}
+
+// Shutdown releases background resources.
+func (s *Server) Shutdown() {
+	if s.mailer != nil {
+		s.mailer.Close()
+	}
+	if s.redisPool != nil {
+		s.redisPool.Close()
+	}
+}
+
+func (s *Server) renderDashboard(w http.ResponseWriter, r *http.Request, extra map[string]any) {
+	data, err := s.dashboardData(r.Context())
+	if err != nil {
+		log.Printf("dashboard data: %v", err)
+		s.renderError(w, r, http.StatusInternalServerError, "Unable to load dashboard")
+		return
+	}
+	if data == nil {
+		data = map[string]any{}
+	}
+	for k, v := range extra {
+		data[k] = v
+	}
+	s.renderTemplate(w, r, "dashboard.html", data)
+}
+
+func (s *Server) dashboardData(ctx context.Context) (map[string]any, error) {
+	user := s.currentUser(ctx)
+	if user == nil {
+		return map[string]any{}, nil
+	}
+	invites, err := s.memberInvites(ctx, user.ID)
+	if err != nil {
+		return nil, err
+	}
+	limit := s.cfg.MaxInvites
+	remaining := limit - len(invites)
+	if limit <= 0 {
+		remaining = -1
+		limit = -1
+	} else if remaining < 0 {
+		remaining = 0
+	}
+	data := map[string]any{
+		"User":             user,
+		"Invites":          invites,
+		"InviteLimit":      limit,
+		"InviteRemaining":  remaining,
+		"MailerConfigured": s.mailer != nil && s.mailer.Enabled(),
+	}
+	return data, nil
+}
+
+type inviteSummary struct {
+	Code      string
+	CreatedAt time.Time
+	UsedAt    *time.Time
+}
+
+func (s *Server) memberInvites(ctx context.Context, userID int) ([]inviteSummary, error) {
+	const query = `SELECT code, created_at, used_at FROM invite_codes WHERE created_by = ? ORDER BY created_at DESC`
+	rows, err := s.db.QueryContext(ctx, query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var invites []inviteSummary
+	for rows.Next() {
+		var (
+			code     string
+			created  time.Time
+			usedTime sql.NullTime
+		)
+		if err := rows.Scan(&code, &created, &usedTime); err != nil {
+			return nil, err
+		}
+		invite := inviteSummary{Code: code, CreatedAt: created}
+		if usedTime.Valid {
+			t := usedTime.Time
+			invite.UsedAt = &t
+		}
+		invites = append(invites, invite)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return invites, nil
+}
+
+func (s *Server) countMemberInvites(ctx context.Context, userID int) (int, error) {
+	const query = `SELECT COUNT(1) FROM invite_codes WHERE created_by = ?`
+	var count int
+	if err := s.db.QueryRowContext(ctx, query, userID).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func generateInviteCode() (string, error) {
+	buf := make([]byte, 10)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return strings.ToUpper(hex.EncodeToString(buf)), nil
+}
+
+func randomPassword() (string, error) {
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
@@ -304,10 +1088,20 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 }
 
 type user struct {
-	ID    int
-	Email string
-	Name  string
-	Admin bool
+	ID                 int
+	Email              string
+	Name               string
+	Admin              bool
+	Bio                string
+	PaymentProvider    string
+	PaymentRef         string
+	DuesCurrent        bool
+	OTPSecret          string
+	OTPEnabledAt       *time.Time
+	SSHPubKey          string
+	Introduction       string
+	HasLDAPPassword    bool
+	HasWireguardConfig bool
 }
 
 func (s *Server) currentUser(ctx context.Context) *user {
@@ -315,12 +1109,63 @@ func (s *Server) currentUser(ctx context.Context) *user {
 	if id == 0 {
 		return nil
 	}
-	return &user{
-		ID:    id,
-		Email: s.sessions.GetString(ctx, "email"),
-		Name:  s.sessions.GetString(ctx, "display_name"),
-		Admin: s.sessions.GetBool(ctx, "is_admin"),
+
+	const query = `SELECT email, display_name, is_admin, bio, payment_provider, payment_ref, dues_current, otp_secret, otp_enabled_at, ssh_pubkey, introduction, ldap_password_encrypted, wireguard_config_encrypted FROM users WHERE id = ?`
+
+	var (
+		email      string
+		name       string
+		admin      int
+		bio        string
+		provider   string
+		paymentRef string
+		dues       int
+		otpSecret  sql.NullString
+		otpEnabled sql.NullTime
+		sshKey     sql.NullString
+		intro      sql.NullString
+		ldapSecret sql.NullString
+		wgSecret   sql.NullString
+	)
+
+	err := s.db.QueryRowContext(ctx, query, id).Scan(&email, &name, &admin, &bio, &provider, &paymentRef, &dues, &otpSecret, &otpEnabled, &sshKey, &intro, &ldapSecret, &wgSecret)
+	if err != nil {
+		log.Printf("lookup current user: %v", err)
+		return &user{
+			ID:          id,
+			Email:       s.sessions.GetString(ctx, "email"),
+			Name:        s.sessions.GetString(ctx, "display_name"),
+			Admin:       s.sessions.GetBool(ctx, "is_admin"),
+			DuesCurrent: s.sessions.GetBool(ctx, "dues_current"),
+		}
 	}
+
+	u := &user{
+		ID:              id,
+		Email:           email,
+		Name:            name,
+		Admin:           admin == 1,
+		Bio:             bio,
+		PaymentProvider: provider,
+		PaymentRef:      paymentRef,
+		DuesCurrent:     dues == 1,
+	}
+	if otpSecret.Valid {
+		u.OTPSecret = strings.TrimSpace(otpSecret.String)
+	}
+	if otpEnabled.Valid {
+		t := otpEnabled.Time
+		u.OTPEnabledAt = &t
+	}
+	if sshKey.Valid {
+		u.SSHPubKey = sshKey.String
+	}
+	if intro.Valid {
+		u.Introduction = intro.String
+	}
+	u.HasLDAPPassword = ldapSecret.Valid && strings.TrimSpace(ldapSecret.String) != ""
+	u.HasWireguardConfig = wgSecret.Valid && strings.TrimSpace(wgSecret.String) != ""
+	return u
 }
 
 func humanizeSlug(slug string) string {
