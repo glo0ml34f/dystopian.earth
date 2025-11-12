@@ -39,10 +39,10 @@ func main() {
 		log.Fatalf("init server: %v", err)
 	}
 
-	httpServer := &http.Server{
-		Addr:    cfg.Addr,
-		Handler: srv.Routes(),
-	}
+        httpServer := &http.Server{
+                Addr:    cfg.Addr,
+                Handler: srv.Routes(),
+        }
 
 	go func() {
 		log.Printf("portal listening on %s", cfg.Addr)
@@ -57,8 +57,9 @@ func main() {
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("graceful shutdown failed: %v", err)
-	}
-	log.Println("portal stopped")
+        if err := httpServer.Shutdown(shutdownCtx); err != nil {
+                log.Printf("graceful shutdown failed: %v", err)
+        }
+        srv.Shutdown()
+        log.Println("portal stopped")
 }

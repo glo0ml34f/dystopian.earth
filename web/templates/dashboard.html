@@ -5,19 +5,32 @@
 {{define "content"}}
 <section class="panel">
     <h1>Member Dashboard</h1>
+    {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
     {{if .Message}}<p class="info">{{.Message}}</p>{{end}}
     {{if .User}}
+    {{if not .User.DuesCurrent}}
+    <p class="warning">Your dues are not marked as current. Contact the coordinators to restore update access.</p>
+    {{end}}
+    {{if not .MailerConfigured}}
+    <p class="warning">Email delivery is currently disabled. Links and approvals will be logged to the server console.</p>
+    {{end}}
     <div class="grid">
         <div>
             <h2>Profile</h2>
             <form method="post" action="/profile">
                 <label>Display Name
-                    <input type="text" name="display_name" value="{{.User.Name}}" required>
+                    <input type="text" name="display_name" value="{{.User.Name}}" {{if not .User.DuesCurrent}}disabled{{end}} required>
                 </label>
                 <label>Bio
-                    <textarea name="bio" rows="3" placeholder="Share a short bio"></textarea>
+                    <textarea name="bio" rows="3" placeholder="Share a short bio" {{if not .User.DuesCurrent}}disabled{{end}}>{{.User.Bio}}</textarea>
                 </label>
-                <button type="submit">Update Profile</button>
+                <label>SSH Public Key
+                    <textarea name="ssh_pubkey" rows="2" placeholder="ssh-ed25519 AAAA..." {{if not .User.DuesCurrent}}disabled{{end}}>{{.User.SSHPubKey}}</textarea>
+                </label>
+                <label>Introduction
+                    <textarea name="introduction" rows="4" placeholder="How do you hope to contribute?" {{if not .User.DuesCurrent}}disabled{{end}}>{{.User.Introduction}}</textarea>
+                </label>
+                <button type="submit" {{if not .User.DuesCurrent}}disabled{{end}}>Update Profile</button>
             </form>
         </div>
         <div>
@@ -25,13 +38,103 @@
             <p>Manage your membership support via your chosen payment provider.</p>
             <form method="post" action="/payment">
                 <label>Provider
-                    <input type="text" name="payment_provider" placeholder="Stripe, Patreon, etc.">
+                    <input type="text" name="payment_provider" value="{{.User.PaymentProvider}}" placeholder="Stripe, Patreon, etc." {{if not .User.DuesCurrent}}disabled{{end}}>
                 </label>
                 <label>Reference
-                    <input type="text" name="payment_ref" placeholder="Customer ID or subscription link">
+                    <input type="text" name="payment_ref" value="{{.User.PaymentRef}}" placeholder="Customer ID or subscription link" {{if not .User.DuesCurrent}}disabled{{end}}>
                 </label>
-                <button type="submit">Save Payment Info</button>
+                <button type="submit" {{if not .User.DuesCurrent}}disabled{{end}}>Save Payment Info</button>
             </form>
+        </div>
+    </div>
+
+    <div class="grid">
+        <div>
+            <h2>One-Time Password</h2>
+            {{if .User.OTPEnabledAt}}
+            <p>OTP enabled {{.User.OTPEnabledAt.Format "2006-01-02 15:04"}} UTC.</p>
+            {{else}}
+            <p>OTP is currently disabled. Enable it to require codes during sign in.</p>
+            {{end}}
+            {{if .OTPSecret}}
+            <p class="info">Secret: <code>{{.OTPSecret}}</code></p>
+            {{if .OTPURI}}<p><a href="{{.OTPURI}}">Add to authenticator</a></p>{{end}}
+            {{end}}
+            <form method="post" action="/profile/otp">
+                <input type="hidden" name="action" value="enable">
+                <button type="submit" {{if not .User.DuesCurrent}}disabled{{end}}>Generate Secret</button>
+            </form>
+            <form method="post" action="/profile/otp">
+                <input type="hidden" name="action" value="disable">
+                <button type="submit" class="secondary" {{if or (not .User.DuesCurrent) (not .User.OTPEnabledAt)}}disabled{{end}}>Disable OTP</button>
+            </form>
+        </div>
+        <div>
+            <h2>LDAP Password</h2>
+            {{if .User.HasLDAPPassword}}
+            <p>A password is stored for LDAP services.</p>
+            {{else}}
+            <p>No LDAP password on file.</p>
+            {{end}}
+            <form method="post" action="/profile/ldap">
+                <input type="hidden" name="action" value="set">
+                <label>New Password
+                    <input type="password" name="ldap_password" minlength="8" {{if not .User.DuesCurrent}}disabled{{end}}>
+                </label>
+                <button type="submit" {{if not .User.DuesCurrent}}disabled{{end}}>Save Password</button>
+            </form>
+            <form method="post" action="/profile/ldap">
+                <input type="hidden" name="action" value="clear">
+                <button type="submit" class="secondary" {{if or (not .User.DuesCurrent) (not .User.HasLDAPPassword)}}disabled{{end}}>Clear Password</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="grid">
+        <div>
+            <h2>WireGuard VPN</h2>
+            {{if .User.HasWireguardConfig}}
+            <p>Encrypted configuration stored for future VPN onboarding.</p>
+            {{else}}
+            <p>No WireGuard configuration generated yet.</p>
+            {{end}}
+            <form method="post" action="/profile/wireguard">
+                <button type="submit" {{if not .User.DuesCurrent}}disabled{{end}}>Generate Credentials</button>
+            </form>
+            {{if .WireguardPassword}}
+            <p class="info">Password: <code>{{.WireguardPassword}}</code></p>
+            {{end}}
+            {{if .WireguardConfig}}
+            <pre class="code">{{.WireguardConfig}}</pre>
+            {{end}}
+        </div>
+        <div>
+            <h2>Invites</h2>
+            {{if .NewInvite}}
+            <p class="info">Share this invite code with a friend: <code>{{.NewInvite}}</code></p>
+            {{end}}
+            {{if lt .InviteLimit 0}}
+            <p>Invite generation is currently unlimited.</p>
+            {{else}}
+            <p>You have {{if ge .InviteRemaining 0}}{{.InviteRemaining}}{{else}}0{{end}} of {{.InviteLimit}} invites remaining.</p>
+            {{end}}
+            <form method="post" action="/invites">
+                <button type="submit" {{if not .User.DuesCurrent}}disabled{{end}}>Mint Invite Code</button>
+            </form>
+            <table>
+                <thead><tr><th>Code</th><th>Created</th><th>Status</th></tr></thead>
+                <tbody>
+                {{range .Invites}}
+                <tr>
+                    <td><code>{{.Code}}</code></td>
+                    <td>{{.CreatedAt.Format "2006-01-02"}}</td>
+                    <td>{{if .UsedAt}}Used {{.UsedAt.Format "2006-01-02"}}{{else}}Unused{{end}}</td>
+                </tr>
+                {{else}}
+                <tr><td colspan="3">No invite codes minted yet.</td></tr>
+                {{end}}
+                </tbody>
+            </table>
         </div>
     </div>
     {{else}}

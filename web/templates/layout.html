@@ -19,6 +19,11 @@
             <a href="/join">Join</a>
             {{if .User}}
             <a href="/dashboard">Dashboard</a>
+            {{if .User.Admin}}
+            <a href="/admin">Admin</a>
+            <a href="/admin/registrations">Registrations</a>
+            <a href="/admin/invites">Invite JWTs</a>
+            {{end}}
             <a href="/logout">Logout</a>
             {{else}}
             <a href="/login">Login</a>
