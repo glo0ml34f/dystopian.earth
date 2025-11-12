@@ -778,9 +778,23 @@ func (s *Server) pendingRegistrations(ctx context.Context) ([]registrationEntry,
 
 	var regs []registrationEntry
 	for rows.Next() {
-		var entry registrationEntry
-		if err := rows.Scan(&entry.ID, &entry.Email, &entry.DisplayName, &entry.InviteCode, &entry.ChallengeAnswer, &entry.SSHPubKey, &entry.Introduction, &entry.CreatedAt); err != nil {
+		var (
+			entry           registrationEntry
+			challengeAnswer sql.NullString
+			sshPubKey       sql.NullString
+			introduction    sql.NullString
+		)
+		if err := rows.Scan(&entry.ID, &entry.Email, &entry.DisplayName, &entry.InviteCode, &challengeAnswer, &sshPubKey, &introduction, &entry.CreatedAt); err != nil {
 			return nil, err
+		}
+		if challengeAnswer.Valid {
+			entry.ChallengeAnswer = challengeAnswer.String
+		}
+		if sshPubKey.Valid {
+			entry.SSHPubKey = sshPubKey.String
+		}
+		if introduction.Valid {
+			entry.Introduction = introduction.String
 		}
 		regs = append(regs, entry)
 	}
