@@ -56,6 +56,58 @@
 </section>
 
 <section class="panel">
+    <h2>System Configuration</h2>
+
+    <h3>Environment Variables</h3>
+    {{if .EnvironmentVariables}}
+    <table class="wide">
+        <thead>
+            <tr>
+                <th>Variable</th>
+                <th>Raw Value</th>
+                <th>Effective Value</th>
+                <th>Source</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .EnvironmentVariables}}
+            <tr>
+                <td><code>{{.Name}}</code></td>
+                <td>{{if eq .RawValue ""}}<em>empty</em>{{else}}<code>{{.RawValue}}</code>{{end}}</td>
+                <td>{{if eq .Effective ""}}<em>empty</em>{{else}}<code>{{.Effective}}</code>{{end}}</td>
+                <td>{{.Source}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <p>No environment variables have been recorded.</p>
+    {{end}}
+
+    <h3>Runtime Settings</h3>
+    {{if .RuntimeSettings}}
+    <table class="wide">
+        <thead>
+            <tr>
+                <th>Setting</th>
+                <th>Value</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .RuntimeSettings}}
+            <tr>
+                <td>{{.Name}}</td>
+                <td>{{if eq .Value ""}}<em>empty</em>{{else}}<code>{{.Value}}</code>{{end}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <p>No runtime configuration details available.</p>
+    {{end}}
+</section>
+
+<section class="panel">
     <h2>Test Email Delivery</h2>
     {{if not .MailerConfigured}}
     <p class="error">Email service is not configured, so test messages cannot be sent.</p>
