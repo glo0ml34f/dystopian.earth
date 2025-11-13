@@ -27,6 +27,8 @@ type Config struct {
 	SMTPUseTLS    bool
 	EmailFrom     string
 	AdminEmail    string
+	TorSOCKS      string
+	TorControl    string
 	EncryptionKey []byte
 	MaxInvites    int
 }
@@ -50,6 +52,8 @@ func FromEnv() Config {
 		SMTPUseTLS:    getEnv("PORTAL_SMTP_TLS", "true") != "false",
 		EmailFrom:     getEnv("PORTAL_EMAIL_FROM", ""),
 		AdminEmail:    getEnv("PORTAL_ADMIN_EMAIL", ""),
+		TorSOCKS:      getEnv("PORTAL_TOR_SOCKS", ""),
+		TorControl:    getEnv("PORTAL_TOR_CONTROL", ""),
 		MaxInvites:    MustEnvInt("PORTAL_MEMBER_INVITES", 10),
 	}
 

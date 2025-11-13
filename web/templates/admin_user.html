@@ -6,6 +6,7 @@
 <section class="panel">
     <h1>Manage {{.Profile.DisplayName}}</h1>
     <p><strong>Email:</strong> {{.Profile.Email}}</p>
+    {{if .Profile.FallbackEmail}}<p class="hint">Fallback contact: {{.Profile.FallbackEmail}}</p>{{end}}
     {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
     {{if .Message}}<p class="info">{{.Message}}</p>{{end}}
     <div class="grid two">
@@ -26,6 +27,9 @@
         <div>
             <h2>Edit Profile</h2>
             <form method="post" action="/admin/users/{{.Profile.ID}}/update" class="stack">
+                <label>Email
+                    <input type="email" name="email" value="{{.Profile.Email}}" required>
+                </label>
                 <label>Display name
                     <input type="text" name="display_name" value="{{.Profile.DisplayName}}" maxlength="64" required>
                 </label>
@@ -34,7 +38,12 @@
                 </label>
                 <div class="grid two">
                     <label>Payment provider
-                        <input type="text" name="payment_provider" value="{{.Profile.PaymentProvider}}" maxlength="128">
+                        <select name="payment_provider">
+                            <option value="" {{if not .Profile.PaymentProvider}}selected{{end}}>— None —</option>
+                            {{range .PaymentProviders}}
+                            <option value="{{.}}" {{if eq $.Profile.PaymentProvider .}}selected{{end}}>{{.}}</option>
+                            {{end}}
+                        </select>
                     </label>
                     <label>Payment reference
                         <input type="text" name="payment_ref" value="{{.Profile.PaymentRef}}" maxlength="128">

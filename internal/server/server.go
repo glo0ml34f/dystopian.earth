@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -13,6 +14,7 @@ import (
 	"log"
 	"net/http"
 	"net/mail"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -47,6 +49,16 @@ type Server struct {
 	inviteJWT *inviteTokenManager
 	mailer    *email.Service
 	cipher    *secure.Cipher
+}
+
+var paymentProviderOptions = []string{"Stripe", "Venmo", "PayPal", "Bitcoin"}
+
+var supportedPaymentProviders = map[string]string{
+	"stripe":  "Stripe",
+	"venmo":   "Venmo",
+	"paypal":  "PayPal",
+	"bitcoin": "Bitcoin",
+	"btc":     "Bitcoin",
 }
 
 // New creates a new server instance.
@@ -153,12 +165,15 @@ func (s *Server) Routes() http.Handler {
 		protected.Use(s.authMiddleware)
 		protected.Get("/dashboard", s.dashboard)
 		protected.Post("/profile", s.updateProfile)
+		protected.Post("/profile/email", s.requestEmailChange)
 		protected.Post("/profile/otp", s.updateOTP)
 		protected.Post("/profile/ldap", s.updateLDAP)
 		protected.Post("/profile/wireguard", s.generateWireguard)
 		protected.Post("/payment", s.updatePayment)
 		protected.Post("/invites", s.createMemberInvite)
 	})
+
+	r.Get("/email/confirm", s.confirmEmailChange)
 
 	r.Group(func(admin chi.Router) {
 		admin.Use(s.authMiddleware)
@@ -170,6 +185,7 @@ func (s *Server) Routes() http.Handler {
 		admin.Post("/admin/users/{id}/promote", s.adminPromoteUser)
 		admin.Post("/admin/users/{id}/toggle-disable", s.adminToggleDisable)
 		admin.Post("/admin/users/{id}/delete", s.adminDeleteUser)
+		admin.Post("/admin/payments/{id}/approve", s.adminApprovePaymentVerification)
 		admin.Get("/admin/registrations", s.listRegistrations)
 		admin.Post("/admin/registrations/{id}/approve", s.approveRegistration)
 		admin.Post("/admin/registrations/{id}/reject", s.rejectRegistration)
@@ -358,16 +374,131 @@ func (s *Server) updateProfile(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) updatePayment(w http.ResponseWriter, r *http.Request) {
+func (s *Server) requestEmailChange(w http.ResponseWriter, r *http.Request) {
 	user := s.currentUser(r.Context())
 	if user == nil {
 		http.Redirect(w, r, "/login", http.StatusFound)
 		return
 	}
-	if !user.DuesCurrent {
+	if err := r.ParseForm(); err != nil {
 		s.renderDashboard(w, r, map[string]any{
-			"Error": "You must be current on dues to update payment details.",
+			"Error": "Unable to read your submission. Please try again.",
 		})
+		return
+	}
+
+	newEmail := strings.TrimSpace(r.PostFormValue("new_email"))
+	if newEmail == "" {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Enter the new email address you would like to use.",
+		})
+		return
+	}
+	if len(newEmail) > 320 {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Email addresses must be 320 characters or fewer.",
+		})
+		return
+	}
+
+	parsed, err := mail.ParseAddress(newEmail)
+	if err != nil {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "That does not look like a valid email address.",
+		})
+		return
+	}
+	newEmail = strings.TrimSpace(parsed.Address)
+	if newEmail == "" || !strings.Contains(newEmail, "@") {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Provide a fully-qualified email address.",
+		})
+		return
+	}
+	if strings.EqualFold(newEmail, user.Email) {
+		s.renderDashboard(w, r, map[string]any{
+			"Message": "That address is already on file.",
+		})
+		return
+	}
+
+	var existingID int
+	err = s.db.QueryRowContext(r.Context(), `SELECT id FROM users WHERE LOWER(email) = LOWER(?)`, newEmail).Scan(&existingID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Printf("check email availability: %v", err)
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "We could not start that email change request.",
+		})
+		return
+	}
+	if existingID != 0 && existingID != user.ID {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Another member is already using that email address.",
+		})
+		return
+	}
+
+	token, err := randomURLToken(32)
+	if err != nil {
+		log.Printf("generate email token: %v", err)
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unable to queue that change at the moment.",
+		})
+		return
+	}
+	hash := sha256.Sum256([]byte(token))
+	expires := time.Now().Add(48 * time.Hour)
+
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		log.Printf("begin email change tx: %v", err)
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unable to queue that change at the moment.",
+		})
+		return
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM email_change_requests WHERE user_id = ? AND approved_at IS NULL`, user.ID); err != nil {
+		log.Printf("clear old email change: %v", err)
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unable to queue that change at the moment.",
+		})
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `INSERT INTO email_change_requests (user_id, new_email, token_hash, expires_at) VALUES (?, ?, ?, ?)`, user.ID, newEmail, hex.EncodeToString(hash[:]), expires); err != nil {
+		log.Printf("insert email change: %v", err)
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unable to queue that change at the moment.",
+		})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("commit email change: %v", err)
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Unable to queue that change at the moment.",
+		})
+		return
+	}
+
+	approvalURL := s.emailApprovalURL(r, token)
+	subject := "Confirm your new dystopian.earth email"
+	body := fmt.Sprintf("Hi %s,\n\nWe received a request to change your member email from %s to %s. Use the link below to approve the update.\n\n%s\n\nIf you did not make this request, ignore this message and your email will stay the same.\n", user.Name, user.Email, newEmail, approvalURL)
+	if s.mailer != nil && s.mailer.Enabled() {
+		s.mailer.Send(email.Message{To: []string{user.Email}, Subject: subject, Body: body})
+	} else {
+		log.Printf("email change approval for %s -> %s: %s", user.Email, newEmail, approvalURL)
+	}
+
+	s.renderDashboard(w, r, map[string]any{
+		"Message": "Check your current inbox for a confirmation link.",
+	})
+}
+
+func (s *Server) updatePayment(w http.ResponseWriter, r *http.Request) {
+	user := s.currentUser(r.Context())
+	if user == nil {
+		http.Redirect(w, r, "/login", http.StatusFound)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
@@ -392,7 +523,15 @@ func (s *Server) updatePayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := s.db.ExecContext(r.Context(), `UPDATE users SET payment_provider = ?, payment_ref = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, provider, reference, user.ID)
+	normalized, ok := supportedPaymentProviders[strings.ToLower(provider)]
+	if !ok {
+		s.renderDashboard(w, r, map[string]any{
+			"Error": "Choose a supported payment provider (Stripe, Venmo, PayPal, or Bitcoin).",
+		})
+		return
+	}
+
+	_, err := s.db.ExecContext(r.Context(), `UPDATE users SET payment_provider = ?, payment_ref = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, normalized, reference, user.ID)
 	if err != nil {
 		log.Printf("update payment: %v", err)
 		s.renderDashboard(w, r, map[string]any{
@@ -401,9 +540,18 @@ func (s *Server) updatePayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.enqueuePaymentVerification(r.Context(), user.ID, normalized, reference); err != nil {
+		log.Printf("queue payment verification: %v", err)
+	}
+
 	s.renderDashboard(w, r, map[string]any{
-		"Message": "Payment preferences saved.",
+		"Message": "Payment update submitted for verification.",
 	})
+}
+
+func (s *Server) enqueuePaymentVerification(ctx context.Context, userID int, provider, reference string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO payment_verifications (user_id, provider, reference) VALUES (?, ?, ?)`, userID, provider, reference)
+	return err
 }
 
 func (s *Server) updateOTP(w http.ResponseWriter, r *http.Request) {
@@ -854,11 +1002,19 @@ func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	queue, err := s.pendingPaymentVerifications(r.Context())
+	if err != nil {
+		log.Printf("list payment verifications: %v", err)
+	}
+
 	data := map[string]any{
 		"Users":                users,
 		"MailerConfigured":     s.mailer != nil && s.mailer.Enabled(),
 		"EnvironmentVariables": s.environmentInsights(),
 		"RuntimeSettings":      s.runtimeSettings(),
+	}
+	if err == nil {
+		data["PaymentQueue"] = queue
 	}
 
 	switch r.URL.Query().Get("status") {
@@ -874,6 +1030,8 @@ func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
 		data["Error"] = "Provide a valid recipient for test emails."
 	case "invalid-recipient":
 		data["Error"] = "That email address is not valid."
+	case "payment-approved":
+		data["Message"] = "Payment update marked as verified."
 	}
 
 	s.renderTemplate(w, r, "admin_dashboard.html", data)
@@ -921,6 +1079,8 @@ func (s *Server) environmentInsights() []envVarInsight {
 	add("PORTAL_SMTP_TLS", strconv.FormatBool(s.cfg.SMTPUseTLS))
 	add("PORTAL_EMAIL_FROM", s.cfg.EmailFrom)
 	add("PORTAL_ADMIN_EMAIL", s.cfg.AdminEmail)
+	add("PORTAL_TOR_SOCKS", s.cfg.TorSOCKS)
+	add("PORTAL_TOR_CONTROL", s.cfg.TorControl)
 	add("PORTAL_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(s.cfg.EncryptionKey))
 	add("PORTAL_MEMBER_INVITES", strconv.Itoa(s.cfg.MaxInvites))
 
@@ -970,6 +1130,8 @@ func (s *Server) runtimeSettings() []runtimeConfigInsight {
 	add("Content Directory", s.cfg.ContentDir)
 	add("Templates Directory", s.cfg.TemplatesDir)
 	add("Static Directory", s.cfg.StaticDir)
+	add("Tor SOCKS Proxy", s.cfg.TorSOCKS)
+	add("Tor Control Address", s.cfg.TorControl)
 
 	return insights
 }
@@ -1023,6 +1185,38 @@ func (s *Server) adminSendTestEmail(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin?status=email-sent", http.StatusSeeOther)
 }
 
+func (s *Server) adminApprovePaymentVerification(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil || id <= 0 {
+		http.Redirect(w, r, "/admin?status=error", http.StatusSeeOther)
+		return
+	}
+	adminID := s.sessions.GetInt(r.Context(), "user_id")
+	if adminID == 0 {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+
+	res, err := s.db.ExecContext(r.Context(), `UPDATE payment_verifications SET status = 'approved', reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ? WHERE id = ? AND status = 'pending'`, adminID, id)
+	if err != nil {
+		log.Printf("approve payment verification %d: %v", id, err)
+		http.Redirect(w, r, "/admin?status=error", http.StatusSeeOther)
+		return
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		log.Printf("payment verification rows: %v", err)
+		http.Redirect(w, r, "/admin?status=error", http.StatusSeeOther)
+		return
+	}
+	if affected == 0 {
+		http.Redirect(w, r, "/admin?status=error", http.StatusSeeOther)
+		return
+	}
+
+	http.Redirect(w, r, "/admin?status=payment-approved", http.StatusSeeOther)
+}
+
 func (s *Server) adminViewUser(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
@@ -1040,7 +1234,7 @@ func (s *Server) adminViewUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data := map[string]any{"Profile": profile}
+	data := map[string]any{"Profile": profile, "PaymentProviders": paymentProviderOptions}
 	switch r.URL.Query().Get("status") {
 	case "updated":
 		data["Message"] = "User profile updated."
@@ -1076,14 +1270,17 @@ func (s *Server) adminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		s.renderError(w, r, http.StatusInternalServerError, "Unable to load that user")
 		return
 	}
+	originalEmail := profile.Email
 	if err := r.ParseForm(); err != nil {
 		s.renderTemplate(w, r, "admin_user.html", map[string]any{
-			"Error":   "Unable to read that submission.",
-			"Profile": profile,
+			"Error":            "Unable to read that submission.",
+			"Profile":          profile,
+			"PaymentProviders": paymentProviderOptions,
 		})
 		return
 	}
 
+	emailValue := strings.TrimSpace(r.PostFormValue("email"))
 	displayName := strings.TrimSpace(r.PostFormValue("display_name"))
 	bio := strings.TrimSpace(r.PostFormValue("bio"))
 	paymentProvider := strings.TrimSpace(r.PostFormValue("payment_provider"))
@@ -1091,6 +1288,7 @@ func (s *Server) adminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	duesCurrent := r.PostFormValue("dues_current") == "on"
 	makeAdmin := r.PostFormValue("is_admin") == "on"
 
+	profile.Email = emailValue
 	profile.DisplayName = displayName
 	profile.Bio = bio
 	profile.PaymentProvider = paymentProvider
@@ -1098,34 +1296,99 @@ func (s *Server) adminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	profile.DuesCurrent = duesCurrent || makeAdmin
 	profile.Admin = makeAdmin
 
+	if emailValue == "" {
+		s.renderTemplate(w, r, "admin_user.html", map[string]any{
+			"Error":            "Email is required.",
+			"Profile":          profile,
+			"PaymentProviders": paymentProviderOptions,
+		})
+		return
+	}
+	parsedEmail, err := mail.ParseAddress(emailValue)
+	if err != nil {
+		s.renderTemplate(w, r, "admin_user.html", map[string]any{
+			"Error":            "Provide a valid email address.",
+			"Profile":          profile,
+			"PaymentProviders": paymentProviderOptions,
+		})
+		return
+	}
+	emailValue = strings.TrimSpace(parsedEmail.Address)
+	if emailValue == "" || !strings.Contains(emailValue, "@") {
+		s.renderTemplate(w, r, "admin_user.html", map[string]any{
+			"Error":            "Provide a fully-qualified email address.",
+			"Profile":          profile,
+			"PaymentProviders": paymentProviderOptions,
+		})
+		return
+	}
+
+	var existingID int
+	err = s.db.QueryRowContext(r.Context(), `SELECT id FROM users WHERE LOWER(email) = LOWER(?)`, emailValue).Scan(&existingID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		log.Printf("admin email availability: %v", err)
+		s.renderTemplate(w, r, "admin_user.html", map[string]any{
+			"Error":            "Unable to validate that email right now.",
+			"Profile":          profile,
+			"PaymentProviders": paymentProviderOptions,
+		})
+		return
+	}
+	if existingID != 0 && existingID != id {
+		s.renderTemplate(w, r, "admin_user.html", map[string]any{
+			"Error":            "Another member already uses that email.",
+			"Profile":          profile,
+			"PaymentProviders": paymentProviderOptions,
+		})
+		return
+	}
+
 	if displayName == "" {
 		s.renderTemplate(w, r, "admin_user.html", map[string]any{
-			"Error":   "Display name is required.",
-			"Profile": profile,
+			"Error":            "Display name is required.",
+			"Profile":          profile,
+			"PaymentProviders": paymentProviderOptions,
 		})
 		return
 	}
 	if len(displayName) > 64 {
 		s.renderTemplate(w, r, "admin_user.html", map[string]any{
-			"Error":   "Display name must be 64 characters or fewer.",
-			"Profile": profile,
+			"Error":            "Display name must be 64 characters or fewer.",
+			"Profile":          profile,
+			"PaymentProviders": paymentProviderOptions,
 		})
 		return
 	}
 	if len(bio) > 1024 {
 		s.renderTemplate(w, r, "admin_user.html", map[string]any{
-			"Error":   "Bio is too long.",
-			"Profile": profile,
+			"Error":            "Bio is too long.",
+			"Profile":          profile,
+			"PaymentProviders": paymentProviderOptions,
 		})
 		return
 	}
 	if len(paymentProvider) > 128 || len(paymentRef) > 128 {
 		s.renderTemplate(w, r, "admin_user.html", map[string]any{
-			"Error":   "Payment details are too long.",
-			"Profile": profile,
+			"Error":            "Payment details are too long.",
+			"Profile":          profile,
+			"PaymentProviders": paymentProviderOptions,
 		})
 		return
 	}
+
+	if paymentProvider != "" {
+		if normalized, ok := supportedPaymentProviders[strings.ToLower(paymentProvider)]; ok {
+			paymentProvider = normalized
+		} else {
+			s.renderTemplate(w, r, "admin_user.html", map[string]any{
+				"Error":            "Payment provider must be Stripe, Venmo, PayPal, or Bitcoin.",
+				"Profile":          profile,
+				"PaymentProviders": paymentProviderOptions,
+			})
+			return
+		}
+	}
+	profile.PaymentProvider = paymentProvider
 
 	if makeAdmin {
 		duesCurrent = true
@@ -1149,11 +1412,48 @@ func (s *Server) adminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	_, err = s.db.ExecContext(r.Context(), `UPDATE users SET display_name = ?, bio = ?, payment_provider = ?, payment_ref = ?, dues_current = ?, is_admin = ? WHERE id = ?`, displayName, bio, paymentProvider, paymentRef, boolToInt(duesCurrent), boolToInt(makeAdmin), id)
+	emailChanged := !strings.EqualFold(originalEmail, emailValue)
+
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		log.Printf("begin admin update user %d: %v", id, err)
+		http.Redirect(w, r, fmt.Sprintf("/admin/users/%d?status=invalid", id), http.StatusSeeOther)
+		return
+	}
+	defer tx.Rollback()
+
+	if emailChanged {
+		if _, err := tx.ExecContext(r.Context(), `UPDATE users SET fallback_email = email WHERE id = ?`, id); err != nil {
+			log.Printf("store fallback email %d: %v", id, err)
+			http.Redirect(w, r, fmt.Sprintf("/admin/users/%d?status=invalid", id), http.StatusSeeOther)
+			return
+		}
+	}
+
+	_, err = tx.ExecContext(r.Context(), `UPDATE users SET email = ?, display_name = ?, bio = ?, payment_provider = ?, payment_ref = ?, dues_current = ?, is_admin = ? WHERE id = ?`, emailValue, displayName, bio, paymentProvider, paymentRef, boolToInt(duesCurrent), boolToInt(makeAdmin), id)
 	if err != nil {
 		log.Printf("update user %d: %v", id, err)
 		http.Redirect(w, r, fmt.Sprintf("/admin/users/%d?status=invalid", id), http.StatusSeeOther)
 		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("commit admin update %d: %v", id, err)
+		http.Redirect(w, r, fmt.Sprintf("/admin/users/%d?status=invalid", id), http.StatusSeeOther)
+		return
+	}
+
+	profile.Email = emailValue
+	if emailChanged {
+		profile.FallbackEmail = originalEmail
+	}
+
+	if emailChanged && s.mailer != nil && s.mailer.Enabled() {
+		subject := "Member email updated by an administrator"
+		body := fmt.Sprintf("Hello,\n\nYour dystopian.earth account email was updated to %s by an administrator. The previous address %s remains on file as a fallback.\n", emailValue, originalEmail)
+		s.mailer.Send(email.Message{To: []string{emailValue}, Subject: subject, Body: body})
+		if originalEmail != "" {
+			s.mailer.Send(email.Message{To: []string{originalEmail}, Subject: subject, Body: body})
+		}
 	}
 
 	http.Redirect(w, r, fmt.Sprintf("/admin/users/%d?status=updated", id), http.StatusSeeOther)
@@ -1343,6 +1643,7 @@ type adminUserProfile struct {
 	OTPConfigured       bool
 	LDAPConfigured      bool
 	WireguardConfigured bool
+	FallbackEmail       string
 }
 
 func (s *Server) pendingRegistrations(ctx context.Context) ([]registrationEntry, error) {
@@ -1383,6 +1684,28 @@ func (s *Server) pendingRegistrations(ctx context.Context) ([]registrationEntry,
 		return nil, err
 	}
 	return regs, nil
+}
+
+func (s *Server) pendingPaymentVerifications(ctx context.Context) ([]paymentVerificationEntry, error) {
+	const query = `SELECT pv.id, pv.user_id, u.display_name, u.email, pv.provider, pv.reference, pv.created_at FROM payment_verifications pv JOIN users u ON u.id = pv.user_id WHERE pv.status = 'pending' ORDER BY pv.created_at`
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []paymentVerificationEntry
+	for rows.Next() {
+		var entry paymentVerificationEntry
+		if err := rows.Scan(&entry.ID, &entry.UserID, &entry.Name, &entry.Email, &entry.Provider, &entry.Reference, &entry.CreatedAt); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 func summarizeInviteToken(token string) (string, []claimPair, string) {
@@ -1470,11 +1793,12 @@ func (s *Server) allUsers(ctx context.Context) ([]adminUserRow, error) {
 }
 
 func (s *Server) loadAdminUser(ctx context.Context, id int) (*adminUserProfile, error) {
-	const query = `SELECT id, email, display_name, bio, payment_provider, payment_ref, dues_current, is_admin, is_disabled, created_at, approved_at, otp_secret, otp_enabled_at, ssh_pubkey, introduction, ldap_password_encrypted, wireguard_config_encrypted FROM users WHERE id = ?`
+	const query = `SELECT id, email, fallback_email, display_name, bio, payment_provider, payment_ref, dues_current, is_admin, is_disabled, created_at, approved_at, otp_secret, otp_enabled_at, ssh_pubkey, introduction, ldap_password_encrypted, wireguard_config_encrypted FROM users WHERE id = ?`
 
 	var (
 		userID       int
 		email        string
+		fallback     sql.NullString
 		name         string
 		bio          string
 		provider     string
@@ -1492,7 +1816,7 @@ func (s *Server) loadAdminUser(ctx context.Context, id int) (*adminUserProfile, 
 		wgSecret     sql.NullString
 	)
 
-	err := s.db.QueryRowContext(ctx, query, id).Scan(&userID, &email, &name, &bio, &provider, &paymentRef, &dues, &adminFlag, &disabledFlag, &created, &approved, &otpSecret, &otpEnabled, &sshKey, &intro, &ldapSecret, &wgSecret)
+	err := s.db.QueryRowContext(ctx, query, id).Scan(&userID, &email, &fallback, &name, &bio, &provider, &paymentRef, &dues, &adminFlag, &disabledFlag, &created, &approved, &otpSecret, &otpEnabled, &sshKey, &intro, &ldapSecret, &wgSecret)
 	if err != nil {
 		return nil, err
 	}
@@ -1510,6 +1834,7 @@ func (s *Server) loadAdminUser(ctx context.Context, id int) (*adminUserProfile, 
 		Bio:             bio,
 		PaymentProvider: provider,
 		PaymentRef:      paymentRef,
+		FallbackEmail:   strings.TrimSpace(fallback.String),
 	}
 	if profile.Admin {
 		profile.DuesCurrent = true
@@ -1749,6 +2074,103 @@ func (s *Server) sendWelcomeEmail(r *http.Request, emailAddr, name, token string
 	log.Printf("welcome link for %s: %s", emailAddr, link)
 }
 
+func (s *Server) confirmEmailChange(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimSpace(r.URL.Query().Get("token"))
+	if token == "" {
+		s.renderTemplate(w, r, "email_confirm.html", map[string]any{
+			"Error": "This approval link is incomplete.",
+		})
+		return
+	}
+
+	hash := sha256.Sum256([]byte(token))
+	const query = `SELECT id, user_id, new_email, expires_at FROM email_change_requests WHERE token_hash = ? AND approved_at IS NULL ORDER BY created_at DESC LIMIT 1`
+	var (
+		requestID int
+		userID    int
+		newEmail  string
+		expires   time.Time
+	)
+	err := s.db.QueryRowContext(r.Context(), query, hex.EncodeToString(hash[:])).Scan(&requestID, &userID, &newEmail, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		s.renderTemplate(w, r, "email_confirm.html", map[string]any{
+			"Error": "This approval link has already been used or is invalid.",
+		})
+		return
+	}
+	if err != nil {
+		log.Printf("load email change: %v", err)
+		s.renderTemplate(w, r, "email_confirm.html", map[string]any{
+			"Error": "We could not process that approval right now.",
+		})
+		return
+	}
+	if time.Now().After(expires) {
+		s.renderTemplate(w, r, "email_confirm.html", map[string]any{
+			"Error": "This approval link has expired. Submit a new request from the member dashboard.",
+		})
+		return
+	}
+
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		log.Printf("begin email confirm tx: %v", err)
+		s.renderTemplate(w, r, "email_confirm.html", map[string]any{
+			"Error": "We could not process that approval right now.",
+		})
+		return
+	}
+	defer tx.Rollback()
+
+	var currentEmail string
+	if err := tx.QueryRowContext(r.Context(), `SELECT email FROM users WHERE id = ?`, userID).Scan(&currentEmail); err != nil {
+		log.Printf("lookup user email: %v", err)
+		s.renderTemplate(w, r, "email_confirm.html", map[string]any{
+			"Error": "We could not process that approval right now.",
+		})
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `UPDATE users SET fallback_email = email, email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, newEmail, userID); err != nil {
+		log.Printf("apply email change: %v", err)
+		message := "We could not finalize this email change."
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			message = "That email address is already associated with another member."
+		}
+		s.renderTemplate(w, r, "email_confirm.html", map[string]any{
+			"Error": message,
+		})
+		return
+	}
+	if _, err := tx.ExecContext(r.Context(), `UPDATE email_change_requests SET approved_at = CURRENT_TIMESTAMP WHERE id = ?`, requestID); err != nil {
+		log.Printf("mark email change approved: %v", err)
+		s.renderTemplate(w, r, "email_confirm.html", map[string]any{
+			"Error": "We could not finalize this email change.",
+		})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("commit email change approval: %v", err)
+		s.renderTemplate(w, r, "email_confirm.html", map[string]any{
+			"Error": "We could not finalize this email change.",
+		})
+		return
+	}
+
+	if s.mailer != nil && s.mailer.Enabled() {
+		subject := "Your dystopian.earth email was updated"
+		body := fmt.Sprintf("Hello,\n\nYour member email has been updated to %s. The previous address %s has been stored as a fallback contact. If you did not approve this change, reach out to the coordinators immediately.\n", newEmail, currentEmail)
+		s.mailer.Send(email.Message{To: []string{newEmail}, Subject: subject, Body: body})
+	} else {
+		log.Printf("email change confirmed for user %d: %s (fallback %s)", userID, newEmail, currentEmail)
+	}
+
+	s.renderTemplate(w, r, "email_confirm.html", map[string]any{
+		"Message":       "Email address updated successfully.",
+		"NewEmail":      newEmail,
+		"PreviousEmail": currentEmail,
+	})
+}
+
 // Shutdown releases background resources.
 func (s *Server) Shutdown() {
 	if s.mailer != nil {
@@ -1798,6 +2220,14 @@ func (s *Server) dashboardData(ctx context.Context) (map[string]any, error) {
 		"InviteLimit":      limit,
 		"InviteRemaining":  remaining,
 		"MailerConfigured": s.mailer != nil && s.mailer.Enabled(),
+		"PaymentProviders": paymentProviderOptions,
+	}
+	pending, err := s.pendingEmailChange(ctx, user.ID)
+	if err != nil {
+		return nil, err
+	}
+	if pending != nil {
+		data["PendingEmailChange"] = pending
 	}
 	return data, nil
 }
@@ -1806,6 +2236,21 @@ type inviteSummary struct {
 	Code      string
 	CreatedAt time.Time
 	UsedAt    *time.Time
+}
+
+type emailChangeSummary struct {
+	NewEmail  string
+	ExpiresAt time.Time
+}
+
+type paymentVerificationEntry struct {
+	ID        int
+	UserID    int
+	Name      string
+	Email     string
+	Provider  string
+	Reference string
+	CreatedAt time.Time
 }
 
 func (s *Server) memberInvites(ctx context.Context, userID int) ([]inviteSummary, error) {
@@ -1839,6 +2284,22 @@ func (s *Server) memberInvites(ctx context.Context, userID int) ([]inviteSummary
 	return invites, nil
 }
 
+func (s *Server) pendingEmailChange(ctx context.Context, userID int) (*emailChangeSummary, error) {
+	const query = `SELECT new_email, expires_at FROM email_change_requests WHERE user_id = ? AND approved_at IS NULL ORDER BY created_at DESC LIMIT 1`
+	var (
+		email   string
+		expires time.Time
+	)
+	err := s.db.QueryRowContext(ctx, query, userID).Scan(&email, &expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &emailChangeSummary{NewEmail: strings.TrimSpace(email), ExpiresAt: expires}, nil
+}
+
 func (s *Server) countMemberInvites(ctx context.Context, userID int) (int, error) {
 	const query = `SELECT COUNT(1) FROM invite_codes WHERE created_by = ?`
 	var count int
@@ -1862,6 +2323,31 @@ func randomPassword() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func randomURLToken(n int) (string, error) {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func (s *Server) emailApprovalURL(r *http.Request, token string) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	host := r.Host
+	if host == "" {
+		host = strings.TrimPrefix(s.cfg.Addr, ":")
+		if host == "" {
+			host = "localhost"
+		} else {
+			host = "localhost:" + host
+		}
+	}
+	return fmt.Sprintf("%s://%s/email/confirm?token=%s", scheme, host, url.QueryEscape(token))
 }
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
@@ -1897,6 +2383,7 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 type user struct {
 	ID                 int
 	Email              string
+	FallbackEmail      string
 	Name               string
 	Admin              bool
 	Bio                string
@@ -1918,10 +2405,11 @@ func (s *Server) currentUser(ctx context.Context) *user {
 		return nil
 	}
 
-	const query = `SELECT email, display_name, is_admin, bio, payment_provider, payment_ref, dues_current, otp_secret, otp_enabled_at, ssh_pubkey, introduction, ldap_password_encrypted, wireguard_config_encrypted, is_disabled FROM users WHERE id = ?`
+	const query = `SELECT email, fallback_email, display_name, is_admin, bio, payment_provider, payment_ref, dues_current, otp_secret, otp_enabled_at, ssh_pubkey, introduction, ldap_password_encrypted, wireguard_config_encrypted, is_disabled FROM users WHERE id = ?`
 
 	var (
 		email      string
+		fallback   sql.NullString
 		name       string
 		admin      int
 		bio        string
@@ -1937,7 +2425,7 @@ func (s *Server) currentUser(ctx context.Context) *user {
 		disabled   int
 	)
 
-	err := s.db.QueryRowContext(ctx, query, id).Scan(&email, &name, &admin, &bio, &provider, &paymentRef, &dues, &otpSecret, &otpEnabled, &sshKey, &intro, &ldapSecret, &wgSecret, &disabled)
+	err := s.db.QueryRowContext(ctx, query, id).Scan(&email, &fallback, &name, &admin, &bio, &provider, &paymentRef, &dues, &otpSecret, &otpEnabled, &sshKey, &intro, &ldapSecret, &wgSecret, &disabled)
 	if err != nil {
 		log.Printf("lookup current user: %v", err)
 		admin := s.sessions.GetBool(ctx, "is_admin")
@@ -1957,6 +2445,7 @@ func (s *Server) currentUser(ctx context.Context) *user {
 	u := &user{
 		ID:              id,
 		Email:           email,
+		FallbackEmail:   strings.TrimSpace(fallback.String),
 		Name:            name,
 		Admin:           admin == 1,
 		Bio:             bio,

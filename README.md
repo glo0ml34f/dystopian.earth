@@ -30,6 +30,8 @@ Skeleton Golang web portal for an online community / hacker collective. It inclu
 | `PORTAL_CONTENT_DIR` | `content` | Markdown content root |
 | `PORTAL_TEMPLATES_DIR` | `web/templates` | Templates directory |
 | `PORTAL_STATIC_DIR` | `web/static` | Static assets directory |
+| `PORTAL_TOR_SOCKS` | `` | Optional Tor SOCKS proxy address for outbound requests |
+| `PORTAL_TOR_CONTROL` | `` | Optional Tor control endpoint for hidden service automation |
 
 ### Run locally
 
