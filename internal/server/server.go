@@ -855,8 +855,10 @@ func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := map[string]any{
-		"Users":            users,
-		"MailerConfigured": s.mailer != nil && s.mailer.Enabled(),
+		"Users":                users,
+		"MailerConfigured":     s.mailer != nil && s.mailer.Enabled(),
+		"EnvironmentVariables": s.environmentInsights(),
+		"RuntimeSettings":      s.runtimeSettings(),
 	}
 
 	switch r.URL.Query().Get("status") {
@@ -875,6 +877,116 @@ func (s *Server) adminDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.renderTemplate(w, r, "admin_dashboard.html", data)
+}
+
+type envVarInsight struct {
+	Name      string
+	RawValue  string
+	Effective string
+	Source    string
+}
+
+func (s *Server) environmentInsights() []envVarInsight {
+	var insights []envVarInsight
+
+	add := func(name string, effective string) {
+		raw := "(default)"
+		source := "default"
+		if val, ok := os.LookupEnv(name); ok {
+			raw = val
+			source = "environment"
+		}
+		insights = append(insights, envVarInsight{
+			Name:      name,
+			RawValue:  raw,
+			Effective: effective,
+			Source:    source,
+		})
+	}
+
+	add("PORTAL_ADDR", s.cfg.Addr)
+	add("PORTAL_DSN", s.cfg.DSN)
+	add("PORTAL_REDIS_ADDR", s.cfg.RedisAddr)
+	add("PORTAL_REDIS_PASSWORD", s.cfg.RedisPassword)
+	add("PORTAL_SESSION_TTL", s.cfg.SessionTTL.String())
+	add("PORTAL_INVITE_SECRET", s.cfg.InviteSecret)
+	add("PORTAL_FLAG_SECRET", s.cfg.FlagSecret)
+	add("PORTAL_CONTENT_DIR", s.cfg.ContentDir)
+	add("PORTAL_TEMPLATES_DIR", s.cfg.TemplatesDir)
+	add("PORTAL_STATIC_DIR", s.cfg.StaticDir)
+	add("PORTAL_SMTP_HOST", s.cfg.SMTPHost)
+	add("PORTAL_SMTP_PORT", strconv.Itoa(s.cfg.SMTPPort))
+	add("PORTAL_SMTP_USERNAME", s.cfg.SMTPUsername)
+	add("PORTAL_SMTP_TOKEN", s.cfg.SMTPToken)
+	add("PORTAL_SMTP_TLS", strconv.FormatBool(s.cfg.SMTPUseTLS))
+	add("PORTAL_EMAIL_FROM", s.cfg.EmailFrom)
+	add("PORTAL_ADMIN_EMAIL", s.cfg.AdminEmail)
+	add("PORTAL_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(s.cfg.EncryptionKey))
+	add("PORTAL_MEMBER_INVITES", strconv.Itoa(s.cfg.MaxInvites))
+
+	return insights
+}
+
+type runtimeConfigInsight struct {
+	Name  string
+	Value string
+}
+
+func (s *Server) runtimeSettings() []runtimeConfigInsight {
+	var insights []runtimeConfigInsight
+
+	add := func(name string, value any) {
+		insights = append(insights, runtimeConfigInsight{
+			Name:  name,
+			Value: fmt.Sprint(value),
+		})
+	}
+
+	if s.sessions != nil {
+		add("Session Lifetime", s.sessions.Lifetime)
+		add("Session Idle Timeout", s.sessions.IdleTimeout)
+		add("Session Cookie Name", s.sessions.Cookie.Name)
+		add("Session Cookie Domain", s.sessions.Cookie.Domain)
+		add("Session Cookie Path", s.sessions.Cookie.Path)
+		add("Session Cookie Secure", s.sessions.Cookie.Secure)
+		add("Session Cookie HTTPOnly", s.sessions.Cookie.HttpOnly)
+		add("Session Cookie Persist", s.sessions.Cookie.Persist)
+		add("Session Cookie SameSite", sameSiteMode(s.sessions.Cookie.SameSite))
+	}
+
+	if s.inviteJWT != nil {
+		add("Invite Token Lifetime", s.inviteJWT.Lifetime())
+	}
+
+	add("Mailer Enabled", s.mailer != nil && s.mailer.Enabled())
+
+	if s.redisPool != nil {
+		add("Redis Max Idle", s.redisPool.MaxIdle)
+		add("Redis Max Active", s.redisPool.MaxActive)
+		add("Redis Idle Timeout", s.redisPool.IdleTimeout)
+	}
+
+	add("Cipher Configured", s.cipher != nil)
+	add("Content Directory", s.cfg.ContentDir)
+	add("Templates Directory", s.cfg.TemplatesDir)
+	add("Static Directory", s.cfg.StaticDir)
+
+	return insights
+}
+
+func sameSiteMode(mode http.SameSite) string {
+	switch mode {
+	case http.SameSiteDefaultMode:
+		return "Default"
+	case http.SameSiteLaxMode:
+		return "Lax"
+	case http.SameSiteStrictMode:
+		return "Strict"
+	case http.SameSiteNoneMode:
+		return "None"
+	default:
+		return fmt.Sprintf("Unknown(%d)", mode)
+	}
 }
 
 func (s *Server) adminSendTestEmail(w http.ResponseWriter, r *http.Request) {
