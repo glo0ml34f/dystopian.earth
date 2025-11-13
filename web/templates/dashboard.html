@@ -9,7 +9,7 @@
     {{if .Message}}<p class="info">{{.Message}}</p>{{end}}
     {{if .User}}
     {{if not .User.DuesCurrent}}
-    <p class="warning">Your dues are not marked as current. Contact the coordinators to restore update access.</p>
+    <p class="warning">Your dues are not marked as current. Profile tools remain limited until they are restored.</p>
     {{end}}
     {{if not .MailerConfigured}}
     <p class="warning">Email delivery is currently disabled. Links and approvals will be logged to the server console.</p>
@@ -17,6 +17,19 @@
     <div class="grid">
         <div>
             <h2>Profile</h2>
+            <p><strong>Email:</strong> {{.User.Email}}</p>
+            {{if .User.FallbackEmail}}
+            <p class="hint">Fallback on record: {{.User.FallbackEmail}}</p>
+            {{end}}
+            {{if .PendingEmailChange}}
+            <p class="info">Pending update to {{.PendingEmailChange.NewEmail}} (expires {{.PendingEmailChange.ExpiresAt.Format "2006-01-02 15:04"}} UTC)</p>
+            {{end}}
+            <form method="post" action="/profile/email" class="stack">
+                <label>Request new email
+                    <input type="email" name="new_email" placeholder="you@example.com" required>
+                </label>
+                <button type="submit">Send Approval Link</button>
+            </form>
             <form method="post" action="/profile">
                 <label>Display Name
                     <input type="text" name="display_name" value="{{.User.Name}}" {{if not .User.DuesCurrent}}disabled{{end}} required>
@@ -35,15 +48,20 @@
         </div>
         <div>
             <h2>Payment</h2>
-            <p>Manage your membership support via your chosen payment provider.</p>
+            <p>Manage your membership support via your chosen payment provider. Updates require coordinator verification.</p>
             <form method="post" action="/payment">
                 <label>Provider
-                    <input type="text" name="payment_provider" value="{{.User.PaymentProvider}}" placeholder="Stripe, Patreon, etc." {{if not .User.DuesCurrent}}disabled{{end}}>
+                    <select name="payment_provider" required>
+                        <option value="" {{if not .User.PaymentProvider}}selected{{end}}>Select a provider</option>
+                        {{range .PaymentProviders}}
+                        <option value="{{.}}" {{if eq $.User.PaymentProvider .}}selected{{end}}>{{.}}</option>
+                        {{end}}
+                    </select>
                 </label>
                 <label>Reference
-                    <input type="text" name="payment_ref" value="{{.User.PaymentRef}}" placeholder="Customer ID or subscription link" {{if not .User.DuesCurrent}}disabled{{end}}>
+                    <input type="text" name="payment_ref" value="{{.User.PaymentRef}}" placeholder="Customer ID or subscription link">
                 </label>
-                <button type="submit" {{if not .User.DuesCurrent}}disabled{{end}}>Save Payment Info</button>
+                <button type="submit">Submit for Verification</button>
             </form>
         </div>
     </div>

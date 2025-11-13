@@ -55,6 +55,46 @@
     {{end}}
 </section>
 
+{{if .PaymentQueue}}
+<section class="panel">
+    <h2>Payment Verification Queue</h2>
+    <p>Confirm updated payment references before marking dues as current.</p>
+    <table class="wide">
+        <thead>
+            <tr>
+                <th>Member</th>
+                <th>Email</th>
+                <th>Provider</th>
+                <th>Reference</th>
+                <th>Submitted</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        {{range .PaymentQueue}}
+            <tr>
+                <td>#{{.UserID}} {{.Name}}</td>
+                <td>{{.Email}}</td>
+                <td>{{.Provider}}</td>
+                <td>{{.Reference}}</td>
+                <td>{{.CreatedAt.Format "2006-01-02 15:04"}}</td>
+                <td>
+                    <form method="post" action="/admin/payments/{{.ID}}/approve">
+                        <button type="submit">Mark Verified</button>
+                    </form>
+                </td>
+            </tr>
+        {{end}}
+        </tbody>
+    </table>
+</section>
+{{else}}
+<section class="panel">
+    <h2>Payment Verification Queue</h2>
+    <p>No payment updates are awaiting review.</p>
+</section>
+{{end}}
+
 <section class="panel">
     <h2>System Configuration</h2>
 

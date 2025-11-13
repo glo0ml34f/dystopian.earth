@@ -1,0 +1,22 @@
+{{define "email_confirm.html"}}
+{{template "layout" .}}
+{{end}}
+
+{{define "content"}}
+<section class="panel narrow">
+    <h1>Email Change Confirmation</h1>
+    {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+    {{if .Message}}
+    <p class="info">{{.Message}}</p>
+    {{if .NewEmail}}
+    <p>Your account contact email is now <strong>{{.NewEmail}}</strong>.</p>
+    {{if .PreviousEmail}}
+    <p>The previous address (<strong>{{.PreviousEmail}}</strong>) has been stored as a fallback.</p>
+    {{end}}
+    <p><a href="/login">Return to the member portal</a></p>
+    {{end}}
+    {{else}}
+    <p>If you reached this page unexpectedly, you can safely close the window.</p>
+    {{end}}
+</section>
+{{end}}
